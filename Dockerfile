@@ -1,14 +1,36 @@
 FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+# Evitar bloqueos interactivos durante la instalación
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Instalar dependencias del sistema (ffmpeg y nodejs para descargas)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    nodejs \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Crear el usuario y crear DE ANTEMANO las carpetas con permisos de escritura
+RUN useradd -m -u 1000 botuser \
+    && mkdir -p /app/data /app/downloads /app/sessions \
+    && chown -R botuser:botuser /app
+
 WORKDIR /app
+
+# Instalar librerías de python
 COPY requirements.txt .
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates nodejs \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir -r requirements.txt \
-    && useradd --create-home --uid 10001 botuser
-COPY --chown=botuser:botuser bot.py task_queue.py todus_s3_storage.py platform_downloads.py telegram_backup.py .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+# Copiar el proyecto con permisos para botuser
+COPY --chown=botuser:botuser . .
+
+# Permisos totales de lectura/escritura en la carpeta /app
+RUN chmod -R 777 /app
+
+# Iniciar con el usuario seguro
 USER botuser
+
 CMD ["python", "bot.py"]
