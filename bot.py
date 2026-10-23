@@ -34,6 +34,7 @@ from telegram import (
     CopyTextButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaDocument,
     Update,
 )
 from telegram.constants import ParseMode
@@ -67,7 +68,7 @@ OWNER_TELEGRAM_ID = 7935796405
 MAX_TRANSFER_HOURS = 24
 MAX_FILE_MB_PREMIUM = 0       # 0 = Ilimitado para Premium
 MAX_FILE_MB_FREE = 2048       # 2048 MB = 2 GB para usuarios Gratis
-MAX_CONCURRENT_UPLOADS = 1
+MAX_CONCURRENT_UPLOADS = 8
 LOG_LEVEL = "INFO"
 GROUP_JOIN_URL = "https://t.me/videogameplay0406"
 DATABASE_PATH = "./data/premium.sqlite3"
@@ -298,7 +299,7 @@ def _get_data_dir() -> Path:
 DATA_DIR = _get_data_dir()
 PLAN_DATA_FILE = str(DATA_DIR / "user_plans.json")
 REFERRAL_START_BALANCE = 5
-REFERRAL_REWARD = 5
+REFERRAL_REWARD = 10
 USAGE_DATA_FILE = str(DATA_DIR / "daily_usage.json")
 HISTORY_DATA_FILE = str(DATA_DIR / "task_history.json")
 USERS_DATA_FILE = str(DATA_DIR / "users.json")
@@ -401,25 +402,69 @@ async def backup_to_telegram(
         )
 
         with temp_zip.open("rb") as doc:
-            sent_msg = await bot_obj.send_document(
-                chat_id=chat_id,
-                document=doc,
-                filename=zip_filename,
-                caption=caption,
-                parse_mode="HTML",
-                disable_notification=True,
-            )
+            # Localizador de mensaje fijado para editar el mismo archivo en vez de enviar repetidos
+            backup_state_file = layout.data_dir / "backup_pinned_msg.json"
+            target_msg_id = None
+            if backup_state_file.exists():
+                try:
+                    target_msg_id = json.loads(backup_state_file.read_text(encoding="utf-8")).get("message_id")
+                except Exception:
+                    target_msg_id = None
 
-        try:
-            await bot_obj.pin_chat_message(
-                chat_id=chat_id,
-                message_id=sent_msg.message_id,
-                disable_notification=True,
-            )
-        except Exception:
-            pass
+            if not target_msg_id:
+                try:
+                    chat_obj = await bot_obj.get_chat(chat_id)
+                    if getattr(chat_obj, "pinned_message", None):
+                        target_msg_id = chat_obj.pinned_message.message_id
+                except Exception:
+                    pass
 
-        log_inst.info(f"✅ Respaldo exitoso en Telegram chat {chat_id}")
+            edited_in_place = False
+            if target_msg_id:
+                try:
+                    await bot_obj.edit_message_media(
+                        chat_id=chat_id,
+                        message_id=target_msg_id,
+                        media=InputMediaDocument(
+                            media=doc,
+                            filename=zip_filename,
+                            caption=caption,
+                            parse_mode="HTML",
+                        ),
+                    )
+                    edited_in_place = True
+                    log_inst.info(f"✅ Respaldo actualizado exitosamente editando el mensaje fijado #{target_msg_id}")
+                except Exception as edit_err:
+                    log_inst.info(f"Aviso: no se pudo editar mensaje fijado #{target_msg_id} ({edit_err}), se enviará uno nuevo y se fijará.")
+
+            if not edited_in_place:
+                sent_msg = await bot_obj.send_document(
+                    chat_id=chat_id,
+                    document=doc,
+                    filename=zip_filename,
+                    caption=caption,
+                    parse_mode="HTML",
+                    disable_notification=True,
+                )
+                target_msg_id = sent_msg.message_id
+                try:
+                    await bot_obj.pin_chat_message(
+                        chat_id=chat_id,
+                        message_id=target_msg_id,
+                        disable_notification=True,
+                    )
+                except Exception:
+                    pass
+                log_inst.info(f"✅ Nuevo respaldo enviado y fijado como #{target_msg_id}")
+
+            try:
+                backup_state_file.write_text(
+                    json.dumps({"message_id": target_msg_id, "updated_at": datetime.now(timezone.utc).isoformat()}),
+                    encoding="utf-8"
+                )
+            except Exception:
+                pass
+
         return True
     except Exception as exc:
         log_inst.warning(f"Error generando respaldo a Telegram: {exc}")
@@ -1238,71 +1283,125 @@ class TransferTask:
         return self.state in {"downloading", "uploading"}
 
 class FairTaskQueue:
+    """Gestor de colas 100% INDEPENDIENTES por cada usuario con balanceo equitativo (Fair-Share).
+    Cada usuario tiene su propio hilo/cola de ejecución: los archivos de un usuario jamás
+    retrasan, bloquean ni ponen en espera a otro usuario.
+    Las películas o APKs pausadas NO cuentan como cola activa."""
     def __init__(self, max_concurrent_per_user=2):
         self.jobs = {}
         self.user_queues = defaultdict(deque)
         self.user_active = defaultdict(set)
-        self.max_concurrent_per_user = max_concurrent_per_user
+        self.default_concurrent_per_user = max_concurrent_per_user
         self._lock = asyncio.Lock()
         self._notify_event = asyncio.Event()
+
+    def get_user_concurrency(self, user_id: int) -> int:
+        if is_owner(user_id):
+            return 4
+        plan_key = get_user_plan(user_id)
+        if plan_key == "premium":
+            return 3
+        elif plan_key in {"vip_medium", "vip_basic"}:
+            return 2
+        return 1
+
     async def enqueue(self, job, user_limit=25):
         async with self._lock:
-            pending = sum(1 for j in self.jobs.values() if j.user_id == job.user_id and j.state in {"queued", "downloading", "uploading"})
-            if pending >= user_limit: return False
+            # Solo cuentan como pendientes las tareas activas o en cola; las PAUSADAS NO ocupan cupo
+            active_or_queued = sum(
+                1 for j in self.jobs.values()
+                if j.user_id == job.user_id and j.state in {"queued", "downloading", "uploading"}
+            )
+            if active_or_queued >= user_limit:
+                return False
             self.jobs[job.task_id] = job
             self.user_queues[job.user_id].append(job)
             self._notify_event.set()
             return True
+
     async def take(self):
+        """Selecciona la siguiente tarea de forma equitativa por usuario, garantizando que
+        cada usuario tenga su propia cola de ejecución independiente sin interferencias."""
         while True:
             async with self._lock:
                 for uid, q in list(self.user_queues.items()):
-                    if not q: continue
-                    if len(self.user_active[uid]) < self.max_concurrent_per_user:
-                        job = q.popleft()
-                        if job.state in {"paused", "cancelled", "done"}: continue
-                        self.user_active[uid].add(job.task_id)
-                        return job
+                    if not q:
+                        continue
+                    max_allowed = self.get_user_concurrency(uid)
+                    if len(self.user_active[uid]) < max_allowed:
+                        while q:
+                            candidate = q.popleft()
+                            if candidate.state in {"paused", "cancelled", "done", "error"}:
+                                continue
+                            self.user_active[uid].add(candidate.task_id)
+                            return candidate
                 self._notify_event.clear()
             await self._notify_event.wait()
+
     def task_finished(self, job):
+        if not job:
+            return
         if job.user_id in self.user_active:
             self.user_active[job.user_id].discard(job.task_id)
         self._notify_event.set()
+
     async def cancel(self, task_id, user_id):
         async with self._lock:
             job = self.jobs.get(task_id)
-            if not job or job.user_id != user_id: return False
+            if not job or job.user_id != user_id:
+                return False
             job.cancel_requested = True
             if job.state == "queued":
                 job.set_state("paused")
                 self.user_queues[user_id] = deque(j for j in self.user_queues[user_id] if j.task_id != task_id)
-                self.task_finished(job)
+            self.task_finished(job)
             return True
+
     async def requeue(self, job):
         async with self._lock:
             job.cancel_requested = False
             job.error = None
             job.set_state("queued")
-            self.user_queues[job.user_id].append(job)
+            if job not in self.user_queues[job.user_id]:
+                self.user_queues[job.user_id].append(job)
             self._notify_event.set()
             return True
+
     async def delete(self, task_id, user_id):
         async with self._lock:
             job = self.jobs.get(task_id)
-            if not job or job.user_id != user_id or job.is_active(): return None
+            if not job or job.user_id != user_id or job.is_active():
+                return None
             self.jobs.pop(task_id, None)
+            if user_id in self.user_queues:
+                self.user_queues[user_id] = deque(j for j in self.user_queues[user_id] if j.task_id != task_id)
             self.task_finished(job)
             return job
-    def for_user(self, user_id, states=None):
-        return sorted([j for j in self.jobs.values() if j.user_id == user_id and (states is None or j.state in states)], key=lambda j: j.created_at, reverse=True)
-    def get_local_active(self, user_id): return [j for j in self.jobs.values() if j.user_id == user_id and j.is_active()]
-    def get_local_queued(self, user_id): return [j for j in self.jobs.values() if j.user_id == user_id and j.state == "queued"]
-    def get_local_paused(self, user_id): return [j for j in self.jobs.values() if j.user_id == user_id and j.state == "paused"]
-    def get_global_active_count(self): return sum(1 for j in self.jobs.values() if j.is_active())
-    def get_global_active_users_count(self): return len({j.user_id for j in self.jobs.values() if j.is_active()})
-    def get_global_queued_count(self): return sum(1 for j in self.jobs.values() if j.state == "queued")
 
+    def for_user(self, user_id, states=None):
+        return sorted(
+            [j for j in self.jobs.values() if j.user_id == user_id and (states is None or j.state in states)],
+            key=lambda j: j.created_at,
+            reverse=True
+        )
+
+    def get_local_active(self, user_id):
+        return [j for j in self.jobs.values() if j.user_id == user_id and j.is_active()]
+
+    def get_local_queued(self, user_id):
+        return [j for j in self.jobs.values() if j.user_id == user_id and j.state == "queued"]
+
+    def get_local_paused(self, user_id):
+        return [j for j in self.jobs.values() if j.user_id == user_id and j.state in {"paused", "error"}]
+
+    def get_global_active_count(self):
+        return sum(1 for j in self.jobs.values() if j.is_active())
+
+    def get_global_active_users_count(self):
+        return len({j.user_id for j in self.jobs.values() if j.is_active()})
+
+    def get_global_queued_count(self):
+        return sum(1 for j in self.jobs.values() if j.state == "queued")
 
 # ═══════════════════════════════════════════════════════════════
 #  INTEGRACIÓN CON TODUS S3 CUBA
@@ -1788,7 +1887,7 @@ def plans_text(user_id: int, bot_username: str | None = None) -> str:
         "🎁 Al registrarte recibes 5$.",
         "👥 Invita a un amigo o contacto:",
         "Tú recibes 5$ y tu amigo",
-        "recibe 5$ de bienvenida.",
+        "recibe 5$ de bienvenida y tú ganas 10$ por cada referido.",
         "",
         "📋 Planes disponibles:",
         "🆓 Gratis · 2 GB/día · 12h nube",
@@ -2435,8 +2534,14 @@ async def task_worker(application: Application) -> None:
     manager: FairTaskQueue = application.bot_data["task_queue"]
     while True:
         job = await manager.take()
-        await process_task(job, application)
-
+        try:
+            await process_task(job, application)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            log.exception(f"Error procesando tarea en worker: {exc}")
+        finally:
+            manager.task_finished(job)
 
 def render_queue_view(user_id: int, manager: FairTaskQueue) -> tuple[str, InlineKeyboardMarkup]:
     local_active = manager.get_local_active(user_id)
@@ -3198,6 +3303,181 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 reply_markup=InlineKeyboardMarkup([[btn("⬅️ ᴘᴀɴᴇʟ ᴀᴅᴍɪɴ", callback_data="admin:back")]]),
             )
             return
+        if query.data == "admin:check":
+            context.user_data["admin_state"] = {"step": "awaiting_check_user_id"}
+            await query.message.edit_text(
+                card("🔍 ᴄᴏɴꜱᴜʟᴛᴀʀ ᴜꜱᴜᴀʀɪᴏ", [
+                    "Envía el ID numérico de Telegram",
+                    "del usuario que deseas consultar.",
+                    "",
+                    "Verás su saldo, plan, cuota usada,",
+                    "referidos y descargas realizadas.",
+                ]),
+                reply_markup=InlineKeyboardMarkup([[btn("⬅️ ᴘᴀɴᴇʟ ᴀᴅᴍɪɴ", callback_data="admin:back")]]),
+            )
+            return
+
+        if query.data.startswith("admin:users:"):
+            page = 0
+            try:
+                page = int(query.data.split(":", 2)[2])
+            except Exception:
+                page = 0
+            users_data = _load_json(USERS_DATA_FILE).get("users", {})
+            user_list = sorted(users_data.items(), key=lambda x: x[1].get("user_id", 0))
+            per_page = 6
+            total_pages = max(1, (len(user_list) + per_page - 1) // per_page)
+            page = max(0, min(page, total_pages - 1))
+            current_slice = user_list[page * per_page:(page + 1) * per_page]
+
+            lines = [f"👥 Total registrados: {len(user_list)}", f"📄 Página {page + 1}/{total_pages}", ""]
+            for uid_str, u in current_slice:
+                name = (u.get("first_name") or u.get("full_name") or "Usuario")[:14]
+                plan_info = get_plan_info(get_user_plan(int(uid_str)))
+                balance = u.get("balance", 0)
+                lines.append(f"• {{mono:{uid_str}}} | {name}")
+                lines.append(f"  {plan_info['badge']} {plan_info['display']} · {balance}$")
+
+            nav_buttons = []
+            if page > 0:
+                nav_buttons.append(btn("⬅️ Anterior", callback_data=f"admin:users:{page - 1}"))
+            if page + 1 < total_pages:
+                nav_buttons.append(btn("Siguiente ➡️", callback_data=f"admin:users:{page + 1}"))
+
+            rows = []
+            if nav_buttons:
+                rows.append(nav_buttons)
+            rows.append([btn("⬅️ ᴘᴀɴᴇʟ ᴀᴅᴍɪɴ", callback_data="admin:back")])
+
+            await query.message.edit_text(
+                card("👥 ᴜꜱᴜᴀʀɪᴏꜱ ʀᴇɢɪꜱᴛʀᴀᴅᴏꜱ", lines),
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        if query.data == "admin:user_history":
+            context.user_data["admin_state"] = {"step": "awaiting_user_history_id"}
+            await query.message.edit_text(
+                card("🗂️ ʜɪꜱᴛᴏʀɪᴀʟ ᴅᴇ ᴜꜱᴜᴀʀɪᴏ", [
+                    "Envía el ID numérico del usuario",
+                    "para ver sus archivos subidos.",
+                ]),
+                reply_markup=InlineKeyboardMarkup([[btn("⬅️ ᴘᴀɴᴇʟ ᴀᴅᴍɪɴ", callback_data="admin:back")]]),
+            )
+            return
+
+        if query.data == "admin:all_history_confirm":
+            await query.message.edit_text(
+                card("⚠️ ʙᴏʀʀᴀʀ ᴛᴏᴅᴏ ᴇʟ ʜɪꜱᴛᴏʀɪᴀʟ", [
+                    "¿Estás seguro de vaciar el",
+                    "historial global de todos los usuarios?",
+                    "",
+                    "Esta acción no se puede deshacer.",
+                ]),
+                reply_markup=InlineKeyboardMarkup([
+                    [btn("✅ ꜱí, ʙᴏʀʀᴀʀ ᴛᴏᴅᴏ", callback_data="admin:all_history_yes")],
+                    [btn("❌ ᴄᴀɴᴄᴇʟᴀʀ", callback_data="admin:back")],
+                ]),
+            )
+            return
+
+        if query.data == "admin:all_history_yes":
+            _save_json(HISTORY_DATA_FILE, {})
+            schedule_data_backup(context.application, "vaciado total del historial por admin")
+            await query.message.edit_text(
+                card("✅ ʜɪꜱᴛᴏʀɪᴀʟ ᴠᴀᴄɪᴀᴅᴏ", [
+                    "El historial global de todos los",
+                    "usuarios fue eliminado correctamente.",
+                ]),
+                reply_markup=InlineKeyboardMarkup([[btn("⬅️ ᴘᴀɴᴇʟ ᴀᴅᴍɪɴ", callback_data="admin:back")]]),
+            )
+            return
+
+        if query.data == "admin:broadcast":
+            context.user_data["admin_state"] = {"step": "awaiting_broadcast_text"}
+            await query.message.edit_text(
+                card("📢 ᴅɪꜰᴜꜱɪóɴ ᴍᴀꜱɪᴠᴀ", [
+                    "Escribe y envía el mensaje que",
+                    "deseas transmitir a todos los",
+                    "usuarios registrados en el bot.",
+                    "",
+                    "Podrás previsualizarlo y confirmarlo",
+                    "antes de realizar el envío.",
+                ]),
+                reply_markup=InlineKeyboardMarkup([[btn("⬅️ ᴘᴀɴᴇʟ ᴀᴅᴍɪɴ", callback_data="admin:back")]]),
+            )
+            return
+
+        if query.data == "admin:broadcast_send":
+            b_text = context.user_data.get("admin_broadcast_text")
+            if not b_text:
+                await query.answer(sc("No hay mensaje para difundir"), show_alert=True)
+                return
+            context.user_data.pop("admin_broadcast_text", None)
+            context.user_data.pop("admin_state", None)
+            user_ids = registered_user_ids()
+            sent_count = 0
+            fail_count = 0
+            await query.message.edit_text(
+                card("📢 ᴇɴᴠɪᴀɴᴅᴏ ᴅɪꜰᴜꜱɪóɴ", [
+                    f"Transmitiendo a {len(user_ids)} usuarios...",
+                    "Por favor espera...",
+                ])
+            )
+            for uid in user_ids:
+                try:
+                    await context.bot.send_message(
+                        chat_id=uid,
+                        text=f"📢 <b>COMUNICADO OFICIAL</b>\n\n{html.escape(b_text)}\n\n{BOT_FOOTER}",
+                        parse_mode="HTML",
+                    )
+                    sent_count += 1
+                    await asyncio.sleep(0.05)
+                except Exception:
+                    fail_count += 1
+            await query.message.edit_text(
+                card("✅ ᴅɪꜰᴜꜱɪóɴ ᴄᴏᴍᴘʟᴇᴛᴀᴅᴀ", [
+                    f"👥 Total usuarios: {len(user_ids)}",
+                    f"✅ Enviados: {sent_count}",
+                    f"❌ Fallidos/Bloqueados: {fail_count}",
+                ]),
+                reply_markup=InlineKeyboardMarkup([[btn("⬅️ ᴘᴀɴᴇʟ ᴀᴅᴍɪɴ", callback_data="admin:back")]]),
+            )
+            return
+
+        if query.data == "admin:report":
+            users_data = _load_json(USERS_DATA_FILE).get("users", {})
+            history_data = _load_json(HISTORY_DATA_FILE)
+            plan_data = _load_json(PLAN_DATA_FILE)
+            total_users = len(users_data)
+            total_transfers = sum(len(h) for h in history_data.values() if isinstance(h, list))
+            total_bytes = 0
+            for u_hist in history_data.values():
+                if isinstance(u_hist, list):
+                    for entry in u_hist:
+                        total_bytes += entry.get("size", 0)
+
+            queue_manager: FairTaskQueue = context.application.bot_data.get("task_queue")
+            act_count = queue_manager.get_global_active_count() if queue_manager else 0
+            q_count = queue_manager.get_global_queued_count() if queue_manager else 0
+
+            lines = [
+                f"👥 Usuarios registrados: {total_users}",
+                f"📦 Transferencias completadas: {total_transfers}",
+                f"💾 Volumen total movido: {_size_label(total_bytes, 2)}",
+                f"⚡ Tareas activas en vivo: {act_count}",
+                f"⏳ Tareas en cola en vivo: {q_count}",
+                f"💰 Recompensa referidos: {REFERRAL_REWARD}$",
+                f"⚡ Límite concurrente bot: {MAX_CONCURRENT_UPLOADS}",
+                "",
+                "🛡️ Sistema 100% operativo y optimizado.",
+            ]
+            await query.message.edit_text(
+                card("🧾 ʀᴇᴘᴏʀᴛᴇ ᴀᴄᴜᴍᴜʟᴀᴛɪᴠᴏ", lines),
+                reply_markup=InlineKeyboardMarkup([[btn("⬅️ ᴘᴀɴᴇʟ ᴀᴅᴍɪɴ", callback_data="admin:back")]]),
+            )
+            return
+
         return
 
     if query.data.startswith("help:"):
@@ -3231,6 +3511,87 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         manager: FairTaskQueue = context.application.bot_data["task_queue"]
         text, markup = render_queue_view(user.id, manager)
         await query.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+        return
+    if query.data == "queue:paused":
+        manager: FairTaskQueue = context.application.bot_data["task_queue"]
+        paused_jobs = manager.get_local_paused(user.id)
+        if not paused_jobs:
+            await query.message.edit_text(
+                card("⏸️ ᴛᴀʀᴇᴀꜱ ᴘᴀᴜꜱᴀᴅᴀꜱ", [
+                    "No tienes tareas pausadas.",
+                    "",
+                    "Todas tus transferencias están",
+                    "activas o ya fueron completadas.",
+                ]),
+                reply_markup=InlineKeyboardMarkup([
+                    [btn("🔄 ᴠᴇʀ ᴍɪ ᴄᴏʟᴀ", callback_data="open_queue")],
+                    [btn("🏠 ɪɴɪᴄɪᴏ", callback_data="home")],
+                ]),
+            )
+            return
+
+        lines = [
+            f"Tienes {len(paused_jobs)} tarea(s) pausada(s).",
+            "",
+            "💡 Recuerda: las tareas pausadas NO",
+            "ocupan cola ni bloquean tus descargas.",
+            "",
+        ]
+        rows = []
+        for i, j in enumerate(paused_jobs[:8], 1):
+            name = (j.filename or j.source_url or "Tarea")[:18]
+            size_str = _size_label(j.size, 1) if j.size else "Tamaño variable"
+            lines.append(f"{i}. ⏸️ {name} ({size_str})")
+            rows.append([
+                btn(f"▶️ Reanudar {i}", callback_data=f"j:{j.task_id}:retry"),
+                btn(f"ℹ️ Info", callback_data=f"j:{j.task_id}:open"),
+                btn(f"🗑️ Borrar", callback_data=f"j:{j.task_id}:delete"),
+            ])
+
+        rows.append([
+            btn("▶️ ʀᴇᴀɴᴜᴅᴀʀ ᴛᴏᴅᴀꜱ", callback_data="queue:resume_all"),
+            btn("🗑️ ʙᴏʀʀᴀʀ ᴛᴏᴅᴀꜱ", callback_data="queue:clear_paused"),
+        ])
+        rows.append([
+            btn("⬅️ ᴠᴏʟᴠᴇʀ ᴀ ᴍɪ ᴄᴏʟᴀ", callback_data="open_queue"),
+            btn("🏠 ɪɴɪᴄɪᴏ", callback_data="home"),
+        ])
+
+        box = card("⏸️ ᴛᴀʀᴇᴀꜱ ᴘᴀᴜꜱᴀᴅᴀꜱ", lines)
+        await query.message.edit_text(
+            f"{box}\n\n{BOT_FOOTER}",
+            reply_markup=InlineKeyboardMarkup(rows),
+            disable_web_page_preview=True,
+        )
+        return
+
+    if query.data == "queue:resume_all":
+        manager: FairTaskQueue = context.application.bot_data["task_queue"]
+        paused_jobs = manager.get_local_paused(user.id)
+        count = 0
+        for j in paused_jobs:
+            await manager.requeue(j)
+            count += 1
+        await query.answer(sc(f"Reanudadas {count} tareas"))
+        text_q, markup_q = render_queue_view(user.id, manager)
+        await query.message.edit_text(text_q, reply_markup=markup_q, disable_web_page_preview=True)
+        return
+
+    if query.data == "queue:clear_paused":
+        manager: FairTaskQueue = context.application.bot_data["task_queue"]
+        paused_jobs = manager.get_local_paused(user.id)
+        count = 0
+        for j in paused_jobs:
+            deleted = await manager.delete(j.task_id, user.id)
+            if deleted:
+                if deleted.temp_path:
+                    Path(deleted.temp_path).unlink(missing_ok=True)
+                for path in deleted.part_paths:
+                    Path(path).unlink(missing_ok=True)
+            count += 1
+        await query.answer(sc(f"Eliminadas {count} tareas pausadas"))
+        text_q, markup_q = render_queue_view(user.id, manager)
+        await query.message.edit_text(text_q, reply_markup=markup_q, disable_web_page_preview=True)
         return
 
     if query.data == "open_history":
@@ -3568,6 +3929,99 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
+        if step == "awaiting_check_user_id":
+            try:
+                target_id = int(text)
+                if target_id <= 0: raise ValueError
+            except ValueError:
+                await message.reply_text(sc("Envía un ID numérico válido."))
+                return
+            context.user_data.pop("admin_state", None)
+            users_data = _load_json(USERS_DATA_FILE).get("users", {})
+            u_info = users_data.get(str(target_id), {})
+            plan_key = get_user_plan(target_id)
+            plan = get_plan_info(plan_key)
+            balance = u_info.get("balance", get_user_balance(target_id))
+            usage = get_daily_usage(target_id)
+            quota_limit = plan.get("daily_limit")
+            quota_str = f"{_size_label(usage, 1)} / {_size_label(quota_limit, 0)}" if quota_limit else f"{_size_label(usage, 1)} / Ilimitado"
+            history = get_task_history(target_id, 10)
+            reg_date = u_info.get("registered_at", "—")
+            if reg_date != "—":
+                try: reg_date = datetime.fromisoformat(reg_date).strftime("%d/%m/%Y")
+                except Exception: pass
+            
+            lines = [
+                f"🆔 ID: {target_id}",
+                f"👤 Nombre: {u_info.get('full_name') or u_info.get('first_name') or 'Desconocido'}",
+                f"🔖 Alias: @{u_info.get('username') or 'sin alias'}",
+                f"💳 Plan: {plan['badge']} {plan['display']}",
+                f"💸 Saldo: {balance}$",
+                f"📦 Cuota hoy: {quota_str}",
+                f"📅 Registro: {reg_date}",
+                f"🗂️ Transferencias: {len(history)}",
+            ]
+            await message.reply_text(
+                card("🔍 ᴅᴀᴛᴏꜱ ᴅᴇʟ ᴜꜱᴜᴀʀɪᴏ", lines),
+                reply_markup=InlineKeyboardMarkup([
+                    [btn("💸 ᴅᴀʀ ꜱᴀʟᴅᴏ", callback_data=f"admin:balance"),
+                     btn("⭐ ᴄᴀᴍʙɪᴀʀ ᴘʟᴀɴ", callback_data=f"admin:plan:vip_basic")],
+                    [btn("⬅️ ᴘᴀɴᴇʟ ᴀᴅᴍɪɴ", callback_data="admin:back")],
+                ]),
+            )
+            return
+
+        if step == "awaiting_user_history_id":
+            try:
+                target_id = int(text)
+                if target_id <= 0: raise ValueError
+            except ValueError:
+                await message.reply_text(sc("Envía un ID numérico válido."))
+                return
+            context.user_data.pop("admin_state", None)
+            history = get_task_history(target_id, 10)
+            if not history:
+                await message.reply_text(
+                    card("🗂️ ʜɪꜱᴛᴏʀɪᴀʟ", [f"El usuario {target_id} no tiene historial registrado."]),
+                    reply_markup=InlineKeyboardMarkup([[btn("⬅️ ᴘᴀɴᴇʟ ᴀᴅᴍɪɴ", callback_data="admin:back")]]),
+                )
+                return
+            lines = [f"Historial de {target_id}:", ""]
+            rows = []
+            for i, h in enumerate(history[:6], 1):
+                name = (h.get("filename") or "Archivo")[:20]
+                lines.append(f"{i}. {name} ({_size_label(h.get('size', 0), 1)})")
+                urls = h.get("urls", [])
+                if urls:
+                    rows.append([btn(f"📎 Enlace {i}", url=urls[0])])
+            rows.append([btn("⬅️ ᴘᴀɴᴇʟ ᴀᴅᴍɪɴ", callback_data="admin:back")])
+            await message.reply_text(
+                card("🗂️ ʜɪꜱᴛᴏʀɪᴀʟ ᴅᴇ ᴜꜱᴜᴀʀɪᴏ", lines),
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        if step == "awaiting_broadcast_text":
+            context.user_data["admin_broadcast_text"] = text
+            context.user_data["admin_state"] = {"step": "confirm_broadcast"}
+            users_count = len(registered_user_ids())
+            preview = text[:200] + ("..." if len(text) > 200 else "")
+            await message.reply_text(
+                card("⚠️ ᴄᴏɴꜰɪʀᴍᴀʀ ᴅɪꜰᴜꜱɪóɴ", [
+                    f"Destinatarios: {users_count} usuarios",
+                    "",
+                    "Mensaje:",
+                    preview,
+                    "",
+                    "¿Proceder con el envío masivo?",
+                ]),
+                reply_markup=InlineKeyboardMarkup([
+                    [btn("📢 ᴇɴᴠɪᴀʀ ᴀ ᴛᴏᴅᴏꜱ", callback_data="admin:broadcast_send")],
+                    [btn("❌ ᴄᴀɴᴄᴇʟᴀʀ", callback_data="admin:back")],
+                ]),
+            )
+            return
+
     if context.user_data.get("awaiting_support"):
         owner_id = OWNER_TELEGRAM_ID
         body = text[:3000]
@@ -3704,7 +4158,14 @@ async def post_init(application: Application) -> None:
     # Si los archivos de usuarios o planes no existen todavía en el nuevo hosting,
     # el bot descarga automáticamente el respaldo de Telegram antes de empezar a operar.
     if backup_chat_id:
-        has_local_data = Path(PLAN_DATA_FILE).exists() and Path(USERS_DATA_FILE).exists()
+        has_local_data = False
+        if Path(PLAN_DATA_FILE).exists() and Path(USERS_DATA_FILE).exists():
+            try:
+                ud = _load_json(USERS_DATA_FILE)
+                if isinstance(ud, dict) and len(ud.get("users", {})) > 0:
+                    has_local_data = True
+            except Exception:
+                has_local_data = False
         if not has_local_data:
             log.info("📢 No se detectó base de datos local: iniciando restauración automática de Telegram...")
             try:
