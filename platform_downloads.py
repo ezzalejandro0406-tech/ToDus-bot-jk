@@ -12,6 +12,56 @@ from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
 PLATFORM_SHORTLINK_HOSTS = {"fb.watch", "vm.tiktok.com", "vt.tiktok.com"}
+
+EMBEDDED_YOUTUBE_COOKIES = """# Netscape HTTP Cookie File
+# http://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file!  Do not edit.
+
+.youtube.com	TRUE	/	TRUE	1807423494	__Secure-BUCKET	CNoD
+.youtube.com	TRUE	/	TRUE	1807423496	__Secure-ROLLOUT_TOKEN	CKqe2_yd9LW88QEQuOyev6m2lwMYteyCwKm2lwM%3D
+.youtube.com	TRUE	/	TRUE	1807423494	__Secure-YNID	CvYBCAUSqAEB8QZuZhneCJwGXOhGpSf2mh3Vsiy4BkerehFcA_83nSuGV5lYpNSDxny8oefgdaVnchhFSFdjjDsYvkkym3yyUncFgzt1plNbqcrFNPsssJaDR8JHyWAsbMcweamyJANMsP4BoDtUk-8bMS8WE3gaNbkXNt3a8p85mjbNyWrPqWmDbYTr9goRF54XvRdHU3PjgAOHZwkCORhZ-sC12y-DKqmfo639yU8oBTJFAd6pnU-GGBX3vaqWVW9xID7t7Ziinwr-OojhPpTXNnSt_3rpYo410QV3HY1jVKhilYmbSexFGpJt62wwZFmPTUviO-sL
+.youtube.com	TRUE	/	TRUE	1812995364	PREF	tz=Asia.Calcutta&f4=4000000
+.youtube.com	TRUE	/	TRUE	1807509445	VISITOR_PRIVACY_METADATA	CgJJThIEGgAgQg%3D%3D
+.youtube.com	TRUE	/	TRUE	1807509445	VISITOR_INFO1_LIVE	op9W4TkXUes
+.youtube.com	TRUE	/	FALSE	1826903408	HSID	AeW5L1QYNvulCRQaP
+.youtube.com	TRUE	/	FALSE	1826903408	APISID	e8gM2Kisf5B55UBT/AdpH0fFp_fE5-1FV3
+.youtube.com	TRUE	/	TRUE	1826903408	SAPISID	BH0RNVipQzE6y4u6/AaMU5jBG8zJ-s655r
+.youtube.com	TRUE	/	FALSE	1826903408	SID	g.a000DwlsHGwkLAaPtcdD4mAHwX66viaa5H1Tgkhcoq_VUpKO9a3xuQqD5PJDhEuS-KKmo9apswACgYKAfoSARASFQHGX2Mi4rAOsNNZCfbQYKQ5HMbi6BoVAUF8yKoyr_COey2y8YGI3XG8JWtl0076
+.youtube.com	TRUE	/	TRUE	1826903408	SSID	A0ajl6Z8Q4Z1tTr2u
+.youtube.com	TRUE	/	TRUE	1826903408	__Secure-1PAPISID	BH0RNVipQzE6y4u6/AaMU5jBG8zJ-s655r
+.youtube.com	TRUE	/	TRUE	1826903408	__Secure-1PSID	g.a000DwlsHGwkLAaPtcdD4mAHwX66viaa5H1Tgkhcoq_VUpKO9a3xJqgCpQGpCf6VdrLi-T63EQACgYKAdwSARASFQHGX2MiDD9IZibWbl-5aSowd-IsyBoVAUF8yKo1vC_lqurZOKdPqvXt_LCh0076
+.youtube.com	TRUE	/	TRUE	1826903408	__Secure-3PAPISID	BH0RNVipQzE6y4u6/AaMU5jBG8zJ-s655r
+.youtube.com	TRUE	/	TRUE	1826903408	__Secure-3PSID	g.a000DwlsHGwkLAaPtcdD4mAHwX66viaa5H1Tgkhcoq_VUpKO9a3xkZ7mzgqnsXEnWk4fOmrQlQACgYKAfASARASFQHGX2MiK09Zi3tOj-tKdGrwccdKGxoVAUF8yKr5G9B1jZWZKEw5uBOTjDHX0076
+.youtube.com	TRUE	/	FALSE	1823883771	SIDCC	AKEyXzV4cnyycGPDVpVH0xJsghSHGVM_jbPx0yeSYPSZ1R0U-4UjWgRaaLhQa7RWW0igmVGX
+.youtube.com	TRUE	/	TRUE	1823883771	__Secure-1PSIDCC	AKEyXzW_HEfuaXHN4y2T3gW6rBPqpUPeWfI9u6m6U63FIFMNTkzw4ikdnpYK018cEqsv4iGv
+.youtube.com	TRUE	/	TRUE	1823883771	__Secure-1PSIDTS	sidts-CjYBkldj_5WN41iaw7C-p292ntZJkGnJlnCPbb0TqbhprOQx1MjXLOpUdW_H008DcgeIX8PC1SQQAA
+.youtube.com	TRUE	/	TRUE	1823883771	__Secure-3PSIDCC	AKEyXzXf9LZXgqomSYW0SbYJSfAwrbPEh8QEyJkqTzH7-_dvi2f-6M_60HBztkmu2aLjFbmveA
+.youtube.com	TRUE	/	TRUE	1823883771	__Secure-3PSIDTS	sidts-CjYBkldj_5WN41iaw7C-p292ntZJkGnJlnCPbb0TqbhprOQx1MjXLOpUdW_H008DcgeIX8PC1SQQAA
+"""
+
+def get_youtube_cookies_path() -> str | None:
+    candidate_paths = [
+        os.getenv("YTDLP_COOKIES_FILE", "").strip(),
+        "cookies.txt",
+        "./cookies.txt",
+        str(Path(__file__).parent / "cookies.txt"),
+        "/tmp/cookies.txt",
+    ]
+    for cp in candidate_paths:
+        if cp and Path(cp).is_file() and Path(cp).stat().st_size > 0:
+            return str(Path(cp).resolve())
+    try:
+        fallback = Path("cookies.txt")
+        fallback.write_text(EMBEDDED_YOUTUBE_COOKIES.strip() + "\n", encoding="utf-8")
+        return str(fallback.resolve())
+    except Exception:
+        try:
+            tmp_path = Path("/tmp/cookies.txt")
+            tmp_path.write_text(EMBEDDED_YOUTUBE_COOKIES.strip() + "\n", encoding="utf-8")
+            return str(tmp_path)
+        except Exception:
+            return None
+
 PLATFORM_HOST_HINTS = {
     "facebook.com", "fb.watch", "youtube.com", "youtu.be", "instagram.com",
     "tiktok.com", "twitter.com", "x.com", "reddit.com", "twitch.tv",
@@ -143,9 +193,14 @@ def download_platform_video(
         # resolver firmas y formatos. Docker instala Node.js y yt-dlp-ejs.
         "js_runtimes": {"node": {}},
     }
-    cookie_file = os.getenv("YTDLP_COOKIES_FILE", "").strip()
-    if cookie_file and Path(cookie_file).is_file():
-        base_options["cookiefile"] = cookie_file
+    cookie_path = get_youtube_cookies_path()
+    if cookie_path:
+        base_options["cookiefile"] = cookie_path
+    base_options["extractor_args"] = {
+        "youtube": {
+            "player_client": ["android", "web", "mweb"]
+        }
+    }
 
     profiles = [
         {

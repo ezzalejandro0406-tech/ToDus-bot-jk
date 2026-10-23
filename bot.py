@@ -1894,30 +1894,49 @@ def _size_label(size: int | float, decimals: int = 2) -> str:
     return f"{size / 1_000_000:.{decimals}f} MB"
 
 
-def upload_progress_text(sent: int, total: int, speed: float = 0, eta: float | None = None) -> str:
-    percent = 100 if total <= 0 else min(100, int(sent * 100 / total))
-    width = 12
-    filled = round(width * percent / 100)
-    bar = "▓" * filled + "░" * (width - filled)
-    return card("📤 ꜱᴜʙɪᴇɴᴅᴏ", [
-        f"📊 {bar} {percent}%",
-        f"📦 {_size_label(sent, 1)}/{_size_label(total, 1)}",
-        f"⚡ {_size_label(speed, 2)}/s",
-        f"⏱️ ETA {_duration_label(eta)}",
-    ])
+def upload_progress_text(sent: int, total: int, speed: float = 0, eta: float | None = None, filename: str = "") -> str:
+    percent = 100.0 if total <= 0 else min(100.0, (sent * 100.0 / total))
+    width = 15
+    filled = round(width * (percent / 100.0))
+    bar = "⬢" * filled + "⬡" * (width - filled)
+    safe_name = (filename or "Archivo").strip()[:40]
+    eta_str = f"{int(eta)}s" if (eta is not None and eta > 0) else "Calculando..."
+    sent_mb = f"{sent / (1024 * 1024):.1f} MB"
+    total_mb = f"{total / (1024 * 1024):.1f} MB" if total > 0 else "Desconocido"
+    speed_mb = f"{max(0.1, speed):.1f} MB/s" if speed > 0 else "0.0 MB/s"
 
+    return (
+        f"📄 <b>{safe_name}</b>\n\n"
+        f"┎ 📤 ꜱᴜʙɪᴇɴᴅᴏ ᴀ ᴛᴏᴅᴜꜱ ꜱ3\n"
+        f"┠ |{bar}|\n"
+        f"┠ ᴘᴏʀᴄᴇɴᴛᴀᴊᴇ: {percent:.2f}%\n"
+        f"┠ ᴘʀᴏᴄᴇꜱᴀᴅᴏ: {sent_mb}/{total_mb}\n"
+        f"┠ ᴠᴇʟᴏᴄɪᴅᴀᴅ: {speed_mb}\n"
+        f"┠ ᴇᴛᴀ: {eta_str}\n"
+        f"┖ ᴍᴏᴛᴏʀ: ᴊᴋ-ᴛᴜʀʙᴏ #worker"
+    )
 
-def download_progress_text(received: int, total: int, speed: float = 0, eta: float | None = None) -> str:
-    percent = 100 if total <= 0 else min(100, int(received * 100 / total))
-    width = 12
-    filled = round(width * percent / 100)
-    bar = "▓" * filled + "░" * (width - filled)
-    return card("📥 ᴅᴇꜱᴄᴀʀɢᴀɴᴅᴏ", [
-        f"📊 {bar} {percent}%",
-        f"📦 {_size_label(received, 1)}/{_size_label(total, 1)}",
-        f"⚡ {_size_label(speed, 2)}/s",
-        f"⏱️ ETA {_duration_label(eta)}",
-    ])
+def download_progress_text(received: int, total: int, speed: float = 0, eta: float | None = None, filename: str = "") -> str:
+    percent = 100.0 if total <= 0 else min(100.0, (received * 100.0 / total))
+    width = 15
+    filled = round(width * (percent / 100.0))
+    bar = "⬢" * filled + "⬡" * (width - filled)
+    safe_name = (filename or "Archivo").strip()[:40]
+    eta_str = f"{int(eta)}s" if (eta is not None and eta > 0) else "Calculando..."
+    rec_mb = f"{received / (1024 * 1024):.1f} MB"
+    total_mb = f"{total / (1024 * 1024):.1f} MB" if total > 0 else "Desconocido"
+    speed_mb = f"{max(0.1, speed):.1f} MB/s" if speed > 0 else "0.0 MB/s"
+
+    return (
+        f"📄 <b>{safe_name}</b>\n\n"
+        f"┎ 📥 ᴅᴇꜱᴄᴀʀɢᴀɴᴅᴏ ʀᴇᴄᴜʀꜱᴏ\n"
+        f"┠ |{bar}|\n"
+        f"┠ ᴘᴏʀᴄᴇɴᴛᴀᴊᴇ: {percent:.2f}%\n"
+        f"┠ ᴘʀᴏᴄᴇꜱᴀᴅᴏ: {rec_mb}/{total_mb}\n"
+        f"┠ ᴠᴇʟᴏᴄɪᴅᴀᴅ: {speed_mb}\n"
+        f"┠ ᴇᴛᴀ: {eta_str}\n"
+        f"┖ ᴍᴏᴛᴏʀ: ᴊᴋ-ᴛᴜʀʙᴏ #worker"
+    )
 
 
 async def upload_to_todus_s3_with_progress(
@@ -2018,7 +2037,7 @@ def main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [btn("📥 DESCARGAS", callback_data="downloads")],
         [btn(f"💸 Saldo: {balance}$ • Referidos", callback_data="balance")],
-        [btn("❓ Ayuda", callback_data="help:0"), btn("📜 Historial", callback_data="open_history")],
+        [btn("❓ Ayuda", callback_data="help:0"), btn("☁️ Mi Nube", callback_data="open_history")],
         [btn("📋 Cola", callback_data="open_queue"), btn("💬 Soporte", callback_data="support")],
         [btn("📊 Mi cuota", callback_data="my_quota"), btn("🏆 Top usuarios", callback_data="top:users")],
         [btn("📢 JK Chanel", url=CHANNEL_JOIN_URL)],
@@ -2185,7 +2204,7 @@ def history_detail_keyboard(entry: dict, index: int) -> InlineKeyboardMarkup:
         rows.append([btn("📋 ᴄᴏᴘɪᴀʀ ᴇɴʟᴀᴄᴇ", copy_text=CopyTextButton(text=urls[0]))])
     rows.append([btn("🗑️ ʙᴏʀʀᴀʀ ᴅᴇʟ ʜɪꜱᴛᴏʀɪᴀʟ", callback_data=f"history:delete:{index}")])
     rows.append([btn("🗑️ ʙᴏʀʀᴀʀ ᴅᴇ ʟᴀ ɴᴜʙᴇ", callback_data=f"history:cloud_delete:{index}")])
-    rows.append([btn("⬅️ ʜɪꜱᴛᴏʀɪᴀʟ", callback_data="open_history")])
+    rows.append([btn("⬅️ ᴍɪ ɴᴜʙᴇ ☁️", callback_data="open_history")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -2781,7 +2800,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     persistent = get_task_history(user.id, 15)
     if not persistent:
         await message.reply_text(
-            card("📜 ʜɪꜱᴛᴏʀɪᴀʟ", ["No tienes historial", "todavía."]),
+            card("☁️ ᴍɪ ɴᴜʙᴇ", ["No tienes historial", "todavía."]),
             reply_markup=home_keyboard(),
         )
         return
@@ -2794,14 +2813,14 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = (entry.get("filename") or "Archivo")[:20]
         lines.append(f"{number}. ✅ {name}")
         lines.append(f"   {dt} · {_size_label(entry.get('size', 0), 1)}")
-    box = card("📜 ʜɪꜱᴛᴏʀɪᴀʟ", lines or ["Sin registros."])
+    box = card("☁️ ᴍɪ ɴᴜʙᴇ", lines or ["Sin registros."])
     rows = []
     for number, entry in enumerate(persistent[:5], 1):
         name = (entry.get("filename") or "Archivo")[:18]
         urls = entry.get("urls", [])
         if urls:
             rows.append([btn(f"📎 {number}. {name}", callback_data=f"history:view:{number - 1}")])
-    rows.append([btn("🗑️ ʙᴏʀʀᴀʀ ʜɪꜱᴛᴏʀɪᴀʟ", callback_data="history:delete_menu")])
+    rows.append([btn("🗑️ ᴠᴀᴄɪᴀʀ ɴᴜʙᴇ", callback_data="history:delete_menu")])
     rows.append([btn("🏠 ɪɴɪᴄɪᴏ", callback_data="home")])
     await message.reply_text(
         f"{box}\n\n{BOT_FOOTER}",
@@ -2892,52 +2911,43 @@ def welcome_text(user_id: int, user_name: str, username: str | None = None) -> s
 
 
 def membership_keyboard(channel_label: str = "Canal", group_label: str = "Grupo") -> InlineKeyboardMarkup:
-    join_buttons = []
-    if CHANNEL_JOIN_URL:
-        join_buttons.append(InlineKeyboardButton(sc(f"📢 {channel_label}"), url=CHANNEL_JOIN_URL))
-    if GROUP_JOIN_URL:
-        join_buttons.append(InlineKeyboardButton(sc(f"👥 {group_label}"), url=GROUP_JOIN_URL))
-    rows = [join_buttons] if join_buttons else []
-    rows.append([InlineKeyboardButton(sc("✅ Ya me uní"), callback_data="membership:verify")])
-    return InlineKeyboardMarkup(rows)
-
-
-def membership_prompt_text(channel_label: str = "canal", group_label: str = "grupo") -> str:
-    return sc(f"Únete a {channel_label} y {group_label}; después pulsa «Ya me uní».")
-
-
-async def required_chat_labels(bot_obj) -> tuple[str, str]:
-    defaults = ["Canal", "Grupo"]
-    configured = [chat for chat in (REQUIRED_CHANNEL, REQUIRED_GROUP) if chat]
-    labels = []
-    for index, chat_id in enumerate(configured[:2]):
-        label = None
-        try:
-            chat = await asyncio.wait_for(bot_obj.get_chat(chat_id), timeout=8)
-            label = getattr(chat, "title", None) or getattr(chat, "username", None)
-            if label and getattr(chat, "username", None) and not str(label).startswith("@"):
-                label = f"@{label}"
-        except Exception:
-            pass
-        labels.append(str(label or defaults[index]))
-    while len(labels) < 2:
-        labels.append(defaults[len(labels)])
-    return labels[0], labels[1]
-
-
-def membership_error_text() -> str:
-    return card("⚠️ ᴠᴇʀɪꜰɪᴄᴀᴄɪóɴ", [
-        "Telegram no permitió consultar",
-        "tu membresía en este momento.",
-        "El bot necesita acceso suficiente",
-        "en el canal o grupo requerido.",
+    ch_url = CHANNEL_JOIN_URL or "https://t.me/gg_no_root"
+    grp_url = GROUP_JOIN_URL or "https://t.me/videogameplay0406"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("ᴊᴋ ᴄʜᴀɴɴᴇʟꫂꤪꤨᴼᶠᶜ", url=ch_url)],
+        [InlineKeyboardButton("ᴊᴋ ᴄʜᴀᴛꫂꤪꤨᴼᶠᶜ", url=grp_url)],
+        [InlineKeyboardButton("ʏᴀ ᴍᴇ ᴜɴɪ ✅", callback_data="membership:verify")],
     ])
 
+def membership_prompt_text(channel_label: str = "canal", group_label: str = "grupo") -> str:
+    return (
+        "<b>Verificación de si te uniste a el canal</b>\n\n"
+        "Para Continuar Debes Unirte\n"
+        "El canal que te falta\n\n"
+        "Cuando te unas presiona\n"
+        "&lt;Ya me uni&gt;"
+    )
+
+async def required_chat_labels(bot_obj) -> tuple[str, str]:
+    return "ᴊᴋ ᴄʜᴀɴɴᴇʟꫂꤪꤨᴼᶠᶜ", "ᴊᴋ ᴄʜᴀᴛꫂꤪꤨᴼᶠᶜ"
+
+def membership_error_text() -> str:
+    return (
+        "<b>Verificación de si te uniste a el canal</b>\n\n"
+        "Para Continuar Debes Unirte\n"
+        "El canal que te falta\n\n"
+        "Cuando te unas presiona\n"
+        "&lt;Ya me uni&gt;"
+    )
 
 def membership_missing_text(labels: list[str]) -> str:
-    missing = labels or ["canal obligatorio"]
-    lines = [f"No estás dentro de {label}." for label in missing]
-    lines += ["", "Únete y pulsa «Ya me uní». "]
+    return (
+        "<b>Verificación de si te uniste a el canal</b>\n\n"
+        "Para Continuar Debes Unirte\n"
+        "El canal que te falta\n\n"
+        "Cuando te unas presiona\n"
+        "&lt;Ya me uni&gt;"
+    )
     return card("🚫 ᴀᴄᴄᴇꜱᴏ ʀᴇꜱᴛʀɪɴɢɪᴅᴏ", lines)
 
 
@@ -3188,13 +3198,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             is_member, check_failed, missing = await check_required_memberships_detailed(context.bot, user.id)
         if is_member:
+            success_text = (
+                "✅ Listo\n"
+                "───────────────────\n"
+                "✅ ¡Verificación exitosa!\n\n"
+                "Ya puedes usar el bot normalmente."
+            )
             await query.message.edit_text(
-                welcome_text(
-                    user.id,
-                    getattr(user, "full_name", "") or getattr(user, "first_name", ""),
-                    getattr(user, "username", None),
-                ),
+                success_text,
                 reply_markup=main_keyboard(user.id),
+                parse_mode=ParseMode.HTML,
             )
         else:
             channel_label, group_label = await required_chat_labels(context.bot)
@@ -3782,7 +3795,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         persistent = get_task_history(user.id, 10)
         if not persistent:
             await query.message.edit_text(
-                card("📜 ʜɪꜱᴛᴏʀɪᴀʟ", ["No tienes historial", "todavía."]),
+                card("☁️ ᴍɪ ɴᴜʙᴇ", ["No tienes historial", "todavía."]),
                 reply_markup=home_keyboard(),
             )
             return
@@ -3801,9 +3814,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             urls = entry.get("urls", [])
             if urls:
                 rows.append([btn(f"📎 {number}. {name}", callback_data=f"history:view:{number - 1}")])
-        rows.append([btn("🗑️ ʙᴏʀʀᴀʀ ʜɪꜱᴛᴏʀɪᴀʟ", callback_data="history:delete_menu")])
+        rows.append([btn("🗑️ ᴠᴀᴄɪᴀʀ ɴᴜʙᴇ", callback_data="history:delete_menu")])
         rows.append([btn("🏠 ɪɴɪᴄɪᴏ", callback_data="home")])
-        box = card("📜 ʜɪꜱᴛᴏʀɪᴀʟ", lines)
+        box = card("☁️ ᴍɪ ɴᴜʙᴇ", lines)
         await query.message.edit_text(
             f"{box}\n\n{BOT_FOOTER}",
             reply_markup=InlineKeyboardMarkup(rows),
@@ -3856,7 +3869,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not entries:
             await query.message.edit_text(
                 card("🗑️ ʙᴏʀʀᴀʀ ʜɪꜱᴛᴏʀɪᴀʟ", ["No hay registros", "para eliminar."]),
-                reply_markup=InlineKeyboardMarkup([[btn("⬅️ ʜɪꜱᴛᴏʀɪᴀʟ", callback_data="open_history")]]),
+                reply_markup=InlineKeyboardMarkup([[btn("⬅️ ᴍɪ ɴᴜʙᴇ ☁️", callback_data="open_history")]]),
             )
             return
         lines = ["Selecciona qué registro", "quieres eliminar:", ""]
@@ -3866,7 +3879,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             lines.append(f"{number}. {name}")
             rows.append([btn(f"🗑️ ᴇʟɪᴍɪɴᴀʀ {number}", callback_data=f"history:delete:{number - 1}")])
         rows.append([btn("🧹 ʙᴏʀʀᴀʀ ᴛᴏᴅᴏ ᴇʟ ʜɪꜱᴛᴏʀɪᴀʟ", callback_data="history:clear:confirm")])
-        rows.append([btn("⬅️ ʜɪꜱᴛᴏʀɪᴀʟ", callback_data="open_history")])
+        rows.append([btn("⬅️ ᴍɪ ɴᴜʙᴇ ☁️", callback_data="open_history")])
         await query.message.edit_text(
             card("🗑️ ʙᴏʀʀᴀʀ ʜɪꜱᴛᴏʀɪᴀʟ", lines),
             reply_markup=InlineKeyboardMarkup(rows),
@@ -3886,7 +3899,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         schedule_data_backup(context.application, "borrado de historial")
         await query.answer(sc("Historial eliminado"))
         await query.message.edit_text(
-            card("📜 ʜɪꜱᴛᴏʀɪᴀʟ", ["Registro eliminado con éxito."]),
+            card("☁️ ᴍɪ ɴᴜʙᴇ", ["Registro eliminado con éxito."]),
             reply_markup=home_keyboard(),
         )
         return
@@ -4331,6 +4344,16 @@ def schedule_data_backup(application: Application, reason: str = "cambio de dato
 
 
 async def post_init(application: Application) -> None:
+    # Garantizar archivo de cookies de YouTube en disco
+    try:
+        from platform_downloads import get_youtube_cookies_path
+        cpath = get_youtube_cookies_path()
+        if cpath:
+            os.environ["YTDLP_COOKIES_FILE"] = str(cpath)
+            log.info(f"Cookies de YouTube cargadas desde: {cpath}")
+    except Exception as ce:
+        log.warning(f"No se pudo inicializar cookies: {ce}")
+
     backup_chat_id = configured_backup_chat_id()
     backup_layout = telegram_backup_layout()
     backup_layout.auth_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
