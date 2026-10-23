@@ -49,6 +49,14 @@ from telegram.ext import (
     filters,
 )
 from telethon import TelegramClient, events
+try:
+    from platform_downloads import is_supported_platform_url, download_platform_video
+except ImportError:
+    def is_supported_platform_url(url: str) -> bool:
+        host = (urlsplit(url).hostname or "").lower()
+        return any(d in host for d in ("youtube.com", "youtu.be", "facebook.com", "fb.watch", "tiktok.com", "instagram.com", "twitter.com", "x.com"))
+    download_platform_video = None
+
 
 # ═══════════════════════════════════════════════════════════════
 #  CONFIGURACIÓN EMBEBIDA (VALORES INTEGRADOS DIRECTAMENTE)
@@ -1097,7 +1105,10 @@ def expire_cloud_files() -> int:
             if not isinstance(entry, dict) or not entry.get("expires_at") or not entry.get("urls"):
                 continue
             try:
-                if datetime.fromisoformat(entry["expires_at"]) > now:
+                exp_dt = datetime.fromisoformat(entry["expires_at"])
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                if exp_dt > now:
                     continue
             except Exception:
                 continue
@@ -1406,26 +1417,126 @@ class FairTaskQueue:
 # ═══════════════════════════════════════════════════════════════
 #  INTEGRACIÓN CON TODUS S3 CUBA
 # ═══════════════════════════════════════════════════════════════
-def upload_to_todus_s3(path: Path, download_name: str, telegram_user_id: int, on_progress=None, timeout_seconds=86400, is_cancelled=None):
-    size = path.stat().st_size
-    sent = 0
-    chunk_size = 8 * 1024 * 1024
-    with path.open("rb") as f:
+class _ToDusProgressStream:
+    def __init__(self, file_obj, total: int, *, on_progress=None, is_cancelled=None, deadline: float):
+        self._file = file_obj
+        self._total = total
+        self._sent = 0
+        self._on_progress = on_progress
+        self._is_cancelled = is_cancelled
+        self._deadline = deadline
+    def __len__(self) -> int:
+        return max(0, self._total - self._sent)
+    def _check(self) -> None:
+        if self._is_cancelled and self._is_cancelled():
+            raise RuntimeError("Subida cancelada.")
+        if time.monotonic() > self._deadline:
+            raise RuntimeError("Se agotó el tiempo máximo de subida a ToDus S3.")
+    def read(self, size: int = -1) -> bytes:
+        self._check()
+        chunk = self._file.read(64 * 1024 if size is None or size < 0 else size)
+        if chunk:
+            self._sent += len(chunk)
+            if self._on_progress:
+                try:
+                    self._on_progress(self._sent, self._total)
+                except Exception:
+                    pass
+        return chunk
+    def __iter__(self):
         while True:
-            if is_cancelled and is_cancelled():
-                raise RuntimeError("Upload paused")
-            chunk = f.read(chunk_size)
+            chunk = self.read(64 * 1024)
             if not chunk:
                 break
-            sent += len(chunk)
-            if on_progress:
-                on_progress(sent, size)
-    base = TODUS_BASE_URL.rstrip("/")
-    url = f"{base}/u{telegram_user_id}/{int(time.time())}_{quote(download_name.strip())}"
-    return url, size
+            yield chunk
+    def __getattr__(self, name):
+        return getattr(self._file, name)
+
+def _build_todus_object_key(telegram_user_id: int, filename: str) -> str:
+    import uuid
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    folder_id = uuid.uuid4().hex[:6]
+    file_id = uuid.uuid4().hex[:12]
+    original_name = Path(filename or "download.bin").name
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", original_name).strip("._") or "download.bin"
+    extension = Path(safe_name).suffix.lower()
+    if not re.fullmatch(r"\.[a-z0-9]{1,16}", extension):
+        extension = ".bin"
+        safe_name = f"{Path(safe_name).stem or 'download'}{extension}"
+    return f"users/tg_{int(telegram_user_id)}/telegram/{stamp}-{folder_id}/telegram_{file_id}_{safe_name}"
+
+def upload_to_todus_s3(path: Path, download_name: str, telegram_user_id: int, on_progress=None, timeout_seconds=86400, is_cancelled=None):
+    try:
+        from todus_s3_storage import upload_to_todus_s3 as _real_storage_upload
+        return _real_storage_upload(
+            local_path=path,
+            filename=download_name,
+            telegram_user_id=telegram_user_id,
+            on_progress=on_progress,
+            timeout_seconds=timeout_seconds,
+            is_cancelled=is_cancelled,
+            base_url=TODUS_BASE_URL,
+        )
+    except Exception as exc:
+        log.info("Usando uploader HTTP directo a ToDus S3: %s", exc)
+
+    import requests
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise FileNotFoundError(f"Archivo no encontrado: {file_path}")
+    size = file_path.stat().st_size
+    key = _build_todus_object_key(telegram_user_id, download_name)
+    url = f"{TODUS_BASE_URL.rstrip('/')}/{quote(key, safe='/')}"
+    content_type = mimetypes.guess_type(download_name)[0] or "application/octet-stream"
+    encoded_name = quote(download_name, safe="")
+    ascii_name = "".join(c if 32 <= ord(c) < 127 and c not in {'"', "\\", ";"} else "_" for c in download_name).strip() or "download.bin"
+    disposition = "attachment" if Path(download_name).suffix.lower() == ".apk" else "inline"
+    headers = {
+        "Content-Type": content_type,
+        "Content-Length": str(size),
+        "Content-Disposition": f'{disposition}; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded_name}',
+        "User-Agent": "JK-Telegram-Bot/2.8",
+    }
+    timeout = max(30, int(timeout_seconds))
+    deadline = time.monotonic() + timeout
+    with requests.Session() as session:
+        for attempt in range(3):
+            if is_cancelled and is_cancelled():
+                raise RuntimeError("Subida cancelada.")
+            try:
+                with file_path.open("rb") as f_obj:
+                    body = _ToDusProgressStream(
+                        f_obj, size, on_progress=on_progress, is_cancelled=is_cancelled, deadline=deadline
+                    )
+                    resp = session.put(url, data=body, headers=headers, timeout=(30, timeout))
+                    if resp.status_code in {200, 201, 204}:
+                        return url, size
+                    if resp.status_code >= 500 and attempt < 2:
+                        time.sleep(2)
+                        continue
+                    raise RuntimeError(f"ToDus S3 respondió HTTP {resp.status_code}")
+            except requests.RequestException as req_err:
+                if attempt < 2 and time.monotonic() < deadline:
+                    time.sleep(2)
+                    continue
+                raise RuntimeError(f"Fallo de conexión con ToDus S3: {req_err}") from req_err
+    raise RuntimeError("No se pudo completar la subida a ToDus S3.")
 
 def delete_from_todus_s3(url: str) -> bool:
-    return True
+    try:
+        from todus_s3_storage import delete_from_todus_s3 as _real_storage_delete
+        _real_storage_delete(url, base_url=TODUS_BASE_URL)
+        return True
+    except Exception:
+        pass
+    try:
+        import requests
+        headers = {"User-Agent": "JK-Telegram-Bot/2.8"}
+        resp = requests.delete(url, timeout=30, headers=headers)
+        return resp.status_code in {200, 204, 404}
+    except Exception as exc:
+        log.warning(f"Error borrando de ToDus S3: {exc}")
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1685,43 +1796,79 @@ async def download_telegram_media(message, mtproto_client=None, progress_callbac
     try:
         size_hint = getattr(media, "file_size", None)
         use_mtproto = mtproto_client is not None and (size_hint is None or size_hint > BOT_API_DOWNLOAD_LIMIT)
-        if size_hint and size_hint > BOT_API_DOWNLOAD_LIMIT and not use_mtproto and not local_bot_api:
-            raise ValueError("Archivo muy grande")
-        for attempt in range(3):
-            path.unlink(missing_ok=True)
-            try:
-                if use_mtproto:
-                    cache_key = (message.chat_id, message.message_id)
-                    original = mtproto_message_cache.get(cache_key) if mtproto_message_cache else None
-                    if original is None and mtproto_message_cache is not None:
-                        try:
-                            await mtproto_client.catch_up()
-                        except Exception:
-                            pass
-                        original = mtproto_message_cache.get(cache_key)
-                    if original is None:
-                        original = await mtproto_client.get_messages(message.chat_id, ids=message.message_id)
-                    if isinstance(original, (list, tuple)):
-                        original = next((item for item in original if item is not None), None)
-                    if original is None or not getattr(original, "media", None):
-                        raise RuntimeError("No se pudo acceder")
-                    downloaded = await mtproto_client.download_media(original, file=str(path), progress_callback=progress_callback)
-                    if not downloaded:
-                        raise RuntimeError("Descarga fallida")
-                else:
+        mtproto_downloaded = False
+
+        if use_mtproto and mtproto_client:
+            original = None
+            cache_key = (message.chat_id, message.message_id)
+            if mtproto_message_cache:
+                original = mtproto_message_cache.get(cache_key)
+
+            if original is None:
+                try:
+                    chat_peer = await mtproto_client.get_entity(message.chat_id)
+                    msgs = await mtproto_client.get_messages(chat_peer, ids=message.message_id)
+                    if isinstance(msgs, (list, tuple)) and msgs:
+                        original = msgs[0]
+                    elif msgs:
+                        original = msgs
+                except Exception as exc:
+                    log.warning("No se pudo resolver entidad MTProto por chat_id: %s", exc)
+
+            if original is None or not getattr(original, "media", None):
+                fwd_chat = getattr(message, "forward_from_chat", None)
+                fwd_id = getattr(message, "forward_from_message_id", None)
+                if not fwd_chat and getattr(message, "forward_origin", None):
+                    origin = message.forward_origin
+                    fwd_chat = getattr(origin, "chat", None)
+                    fwd_id = getattr(origin, "message_id", None)
+                if fwd_chat and fwd_id:
                     try:
-                        telegram_file = await media.get_file(read_timeout=180, connect_timeout=30)
+                        target = getattr(fwd_chat, "username", None) or fwd_chat.id
+                        ch_entity = await mtproto_client.get_entity(target)
+                        msgs = await mtproto_client.get_messages(ch_entity, ids=fwd_id)
+                        if isinstance(msgs, (list, tuple)) and msgs:
+                            original = msgs[0]
+                        elif msgs:
+                            original = msgs
+                    except Exception as exc:
+                        log.warning("No se pudo resolver reenvío en canal MTProto: %s", exc)
+
+            if original and getattr(original, "media", None):
+                for attempt in range(3):
+                    path.unlink(missing_ok=True)
+                    try:
+                        res = await mtproto_client.download_media(original, file=str(path), progress_callback=progress_callback)
+                        if res and path.exists() and path.stat().st_size > 0:
+                            mtproto_downloaded = True
+                            break
+                    except Exception as exc:
+                        log.warning("Descarga MTProto intento %d falló: %s", attempt + 1, exc)
+                        await asyncio.sleep(1.5)
+
+        if not mtproto_downloaded:
+            for attempt in range(3):
+                path.unlink(missing_ok=True)
+                try:
+                    try:
+                        telegram_file = await media.get_file(read_timeout=240, connect_timeout=45)
                     except TypeError:
                         telegram_file = await media.get_file()
                     await telegram_file.download_to_drive(custom_path=str(path))
-                break
-            except (TimedOut, TimeoutError, asyncio.TimeoutError, aiohttp.ClientError):
-                if attempt == 2:
-                    raise
-                await asyncio.sleep(2 ** attempt)
+                    if path.exists() and path.stat().st_size > 0:
+                        break
+                except (TimedOut, TimeoutError, asyncio.TimeoutError, aiohttp.ClientError):
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(2 ** attempt)
+                except Exception as exc:
+                    if attempt == 2:
+                        raise ValueError(f"No se pudo descargar el archivo de Telegram ({exc})")
+                    await asyncio.sleep(1.5)
+
         actual_size = path.stat().st_size
         if actual_size == 0:
-            raise ValueError("Archivo vacío")
+            raise ValueError("El archivo recibido está vacío.")
         safe_filename = normalize_telegram_generated_name(filename, fallback)
         safe_filename = normalize_apk_filename(path, safe_filename)
         validate_downloaded_file(path, safe_filename)
@@ -2367,36 +2514,62 @@ async def process_task(job: TransferTask, application: Application) -> None:
             if job.source_kind == "url":
                 source_url = job.source_url or ""
                 seconds = MAX_TRANSFER_HOURS * 3600
-                if temp_path is None:
-                    partial = tempfile.NamedTemporaryFile(prefix="tg-download-", suffix=".part", dir=TMPDIR, delete=False)
-                    partial.close()
-                    temp_path = Path(partial.name)
-                    job.temp_path = str(temp_path)
-                connector = aiohttp.TCPConnector(
-                    resolver=PublicOnlyResolver(),
-                    use_dns_cache=True,
-                    ttl_dns_cache=600,
-                    limit=0,
-                    keepalive_timeout=90,
-                    enable_cleanup_closed=True,
-                )
-                async with aiohttp.ClientSession(
-                    connector=connector,
-                    timeout=aiohttp.ClientTimeout(total=seconds, connect=30, sock_read=180),
-                    trust_env=False,
-                    auto_decompress=False,
-                    read_bufsize=8 * 1024 * 1024,
-                    headers={
-                        "Accept-Encoding": "identity",
-                        "User-Agent": "JK-Bot/2.8-Turbo (High-Speed Downloader)",
-                        "Connection": "keep-alive",
-                    },
-                ) as session:
-                    temp_path, filename, size = await download_to_temp(
-                        session, source_url, report_download_progress, max_bytes,
+                if callable(download_platform_video) and is_supported_platform_url(source_url):
+                    job.set_state("downloading")
+                    await _edit_task_status(job, card("📥 ᴅᴇꜱᴄᴀʀɢᴀɴᴅᴏ", [
+                        "Descargando vídeo...",
+                        "Procesando con yt-dlp...",
+                    ]))
+                    ytdlp_work_dir = Path(TMPDIR) / f"ytdlp-{job.task_id}"
+                    loop = asyncio.get_running_loop()
+                    def ytdlp_progress(downloaded, total):
+                        try:
+                            asyncio.run_coroutine_threadsafe(
+                                report_download_progress(downloaded, total),
+                                loop
+                            )
+                        except Exception:
+                            pass
+                    temp_path, filename, size = await asyncio.to_thread(
+                        download_platform_video,
+                        source_url,
+                        ytdlp_work_dir,
+                        max_bytes=max_bytes,
+                        max_duration_seconds=seconds,
+                        progress_hook=ytdlp_progress,
                         is_cancelled=lambda: job.cancel_requested,
-                        partial_path=temp_path,
                     )
+                else:
+                    if temp_path is None:
+                        partial = tempfile.NamedTemporaryFile(prefix="tg-download-", suffix=".part", dir=TMPDIR, delete=False)
+                        partial.close()
+                        temp_path = Path(partial.name)
+                        job.temp_path = str(temp_path)
+                    connector = aiohttp.TCPConnector(
+                        resolver=PublicOnlyResolver(),
+                        use_dns_cache=True,
+                        ttl_dns_cache=600,
+                        limit=0,
+                        keepalive_timeout=90,
+                        enable_cleanup_closed=True,
+                    )
+                    async with aiohttp.ClientSession(
+                        connector=connector,
+                        timeout=aiohttp.ClientTimeout(total=seconds, connect=30, sock_read=180),
+                        trust_env=False,
+                        auto_decompress=False,
+                        read_bufsize=8 * 1024 * 1024,
+                        headers={
+                            "Accept-Encoding": "identity",
+                            "User-Agent": "JK-Bot/2.8-Turbo (High-Speed Downloader)",
+                            "Connection": "keep-alive",
+                        },
+                    ) as session:
+                        temp_path, filename, size = await download_to_temp(
+                            session, source_url, report_download_progress, max_bytes,
+                            is_cancelled=lambda: job.cancel_requested,
+                            partial_path=temp_path,
+                        )
             else:
                 temp_path, filename, size = await download_telegram_media(
                     job.source_message, application.bot_data.get("mtproto_client"),
@@ -2836,20 +3009,31 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         match = re.fullmatch(r"ref_(\d+)", str(args[0]).strip(), re.IGNORECASE)
         if match:
             referrer_id = int(match.group(1))
-            if apply_referral(user.id, referrer_id):
-                referral_notice = "\n\n🎁 Recibiste 5$ de bienvenida por entrar con un enlace de invitación."
-                try:
-                    await context.bot.send_message(
-                        chat_id=referrer_id,
-                        text=card("🎉 ʀᴇꜰᴇʀɪᴅᴏ ᴄᴏɴꜰɪʀᴍᴀᴅᴏ", [
-                            "Alguien entró con tu enlace.",
-                            "🎊 ¡Felicidades! Recibiste 5$.",
-                            f"💳 Saldo actual: {get_user_balance(referrer_id)}$",
-                        ]),
-                    )
-                except Exception:
-                    pass
-                schedule_data_backup(context.application, "recompensa de referido")
+            if user.id == referrer_id:
+                referral_notice = "\n\n⚠️ No puedes usar tu propio enlace de invitación."
+            else:
+                users_data = _load_json(USERS_DATA_FILE).get("users", {})
+                user_entry = users_data.get(str(user.id), {}) if isinstance(users_data, dict) else {}
+                if user_entry.get("referred_by") or user_entry.get("referral_rewarded"):
+                    referral_notice = "\n\n⚠️ Ya eres usuario de este bot y utilizaste un enlace de invitación anteriormente."
+                elif str(user.id) in users_data and user_entry.get("first_seen"):
+                    referral_notice = "\n\n⚠️ Ya eres usuario registrado de este bot. Los enlaces de invitación solo son válidos para nuevos miembros."
+                elif apply_referral(user.id, referrer_id):
+                    referral_notice = "\n\n🎁 Recibiste 5$ de bienvenida por entrar con un enlace de invitación."
+                    try:
+                        await context.bot.send_message(
+                            chat_id=referrer_id,
+                            text=card("🎉 ʀᴇꜰᴇʀɪᴅᴏ ᴄᴏɴꜰɪʀᴍᴀᴅᴏ", [
+                                "Alguien entró con tu enlace.",
+                                "🎊 ¡Felicidades! Recibiste 5$.",
+                                f"💳 Saldo actual: {get_user_balance(referrer_id)}$",
+                            ]),
+                        )
+                    except Exception:
+                        pass
+                    schedule_data_backup(context.application, "recompensa de referido")
+                else:
+                    referral_notice = "\n\n⚠️ Ya eres usuario de este bot o el enlace ya no es válido." 
     await update.effective_message.reply_text(
         welcome_text(
             user.id,
