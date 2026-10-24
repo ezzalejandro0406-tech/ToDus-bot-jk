@@ -144,25 +144,16 @@ def sc(value: str) -> str:
     return "".join(result)
 
 
-CARD_INNER_WIDTH = 22
-CARD_TOP = "╭" + "━" * CARD_INNER_WIDTH + "╮"
-CARD_MID = "├" + "─" * CARD_INNER_WIDTH + "┤"
-CARD_BOT = "╰" + "━" * CARD_INNER_WIDTH + "╯"
-
 PROTECTED_PATTERN = re.compile(r"(<[^>]+>|\{mono:[^}]+})")
 
 
 def card(title: str, lines: list[str] | tuple[str, ...]) -> str:
-    """Genera el recuadro visual seguro. Protege etiquetas HTML y {mono:xxx}."""
-    def box_content(value: str) -> str:
-        visible_text = re.sub(r"<[^>]+>", "", value)
-        padding = max(0, CARD_INNER_WIDTH - len(visible_text))
-        return f"┃ {value}{' ' * padding}"
-
-    out = [CARD_TOP, box_content(sc(title)), CARD_MID]
+    """Genera tarjetas con estética premium unificada usando brackets futuristas (┎ ┠ ┖)."""
+    header_title = sc(title) if "<" not in title else title
+    out = [f"┎ <b>{header_title}</b>", "┠──────────────────────"]
     for line in lines:
         if line == "":
-            out.append(box_content(""))
+            out.append("┠")
             continue
         line_str = str(line)
         protected_parts = []
@@ -174,29 +165,20 @@ def card(title: str, lines: list[str] | tuple[str, ...]) -> str:
                 protected_parts.append(f"<code>{html.escape(val, quote=False)}</code>")
             else:
                 protected_parts.append(token)
-            return f"\x00PROT{len(protected_parts) - 1}\x00"
+            return f"\x00__{len(protected_parts) - 1}__\x00"
 
         protected = PROTECTED_PATTERN.sub(_save_protected, line_str)
-        wrapped = textwrap.wrap(
-            sc(protected),
-            width=26,
-            break_long_words=False,
-            break_on_hyphens=False,
-        ) or [sc(protected)]
-        for part in wrapped:
-            for i, val in enumerate(protected_parts):
-                part = part.replace(f"\x00PROT{i}\x00", val)
-            out.append(box_content(part))
-    out.append(CARD_BOT)
+        for i, val in enumerate(protected_parts):
+            protected = protected.replace(f"\x00__{i}__\x00", val)
+        out.append(f"┠ {protected}")
+
+    out.append(f"┖ ⚡ <b>{BOT_NAME}</b>")
     return "\n".join(out)
 
 
 def card_with_credit(title: str, lines: list[str] | tuple[str, ...]) -> str:
-    full_lines = list(lines)
-    full_lines.append("")
-    full_lines.append(f"ᴄʀᴇᴀᴅᴏʀ: {BOT_CREATOR}")
-    box = card(title, full_lines)
-    return f"{box}\n\n{BOT_FOOTER}"
+    return card(title, lines)
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1887,6 +1869,48 @@ def _duration_label(seconds: float | None) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
 
 
+def format_media_header(filename: str = "", source_url: str | None = None) -> str:
+    name = (filename or "").strip()
+    if not name and source_url:
+        low = source_url.lower()
+        if "youtube.com" in low or "youtu.be" in low:
+            name = "Video de YouTube.mp4"
+        elif "tiktok.com" in low:
+            name = "Video de TikTok.mp4"
+        elif "facebook.com" in low or "fb.watch" in low:
+            name = "Video de Facebook.mp4"
+        elif "instagram.com" in low:
+            name = "Video de Instagram.mp4"
+        else:
+            try:
+                name = Path(urlsplit(source_url).path).name or "Archivo.bin"
+            except Exception:
+                name = "Archivo.bin"
+    if not name:
+        name = "Archivo"
+
+    ext = Path(name).suffix.lower()
+    stem = Path(name).stem if ext else name
+    display_title = stem[:34] + (ext if ext else "")
+
+    if ext in {".mp4", ".mkv", ".avi", ".mov", ".flv", ".webm", ".ts", ".3gp", ".m4v"} or (source_url and any(h in source_url.lower() for h in ("youtube", "youtu.be", "tiktok", "facebook", "fb.watch"))):
+        icon = "🎬"
+    elif ext in {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac", ".opus"}:
+        icon = "🎵"
+    elif ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}:
+        icon = "🖼️"
+    elif ext in {".apk", ".xapk"}:
+        icon = "📱"
+    elif ext in {".zip", ".rar", ".7z", ".tar", ".gz"}:
+        icon = "📦"
+    elif ext in {".pdf", ".docx", ".doc", ".xlsx", ".txt"}:
+        icon = "📑"
+    else:
+        icon = "📄"
+
+    return f"{icon} <b>{display_title}</b>"
+
+
 def _size_label(size: int | float, decimals: int = 2) -> str:
     size = max(0, float(size))
     if size >= 1_000_000_000:
@@ -1894,48 +1918,48 @@ def _size_label(size: int | float, decimals: int = 2) -> str:
     return f"{size / 1_000_000:.{decimals}f} MB"
 
 
-def upload_progress_text(sent: int, total: int, speed: float = 0, eta: float | None = None, filename: str = "") -> str:
+def upload_progress_text(sent: int, total: int, speed: float = 0, eta: float | None = None, filename: str = "", source_url: str | None = None) -> str:
     percent = 100.0 if total <= 0 else min(100.0, (sent * 100.0 / total))
     width = 15
     filled = round(width * (percent / 100.0))
     bar = "⬢" * filled + "⬡" * (width - filled)
-    safe_name = (filename or "Archivo").strip()[:40]
+    header = format_media_header(filename, source_url)
     eta_str = f"{int(eta)}s" if (eta is not None and eta > 0) else "Calculando..."
     sent_mb = f"{sent / (1024 * 1024):.1f} MB"
     total_mb = f"{total / (1024 * 1024):.1f} MB" if total > 0 else "Desconocido"
     speed_mb = f"{max(0.1, speed):.1f} MB/s" if speed > 0 else "0.0 MB/s"
 
     return (
-        f"📄 <b>{safe_name}</b>\n\n"
+        f"{header}\n\n"
         f"┎ 📤 ꜱᴜʙɪᴇɴᴅᴏ ᴀ ᴛᴏᴅᴜꜱ ꜱ3\n"
         f"┠ |{bar}|\n"
         f"┠ ᴘᴏʀᴄᴇɴᴛᴀᴊᴇ: {percent:.2f}%\n"
         f"┠ ᴘʀᴏᴄᴇꜱᴀᴅᴏ: {sent_mb}/{total_mb}\n"
         f"┠ ᴠᴇʟᴏᴄɪᴅᴀᴅ: {speed_mb}\n"
         f"┠ ᴇᴛᴀ: {eta_str}\n"
-        f"┖ ᴍᴏᴛᴏʀ: ᴊᴋ-ᴛᴜʀʙᴏ #worker"
+        f"┖ ꜱɪꜱᴛᴇᴍᴀ: ᴊᴋ ᴅᴏᴡɴ ʙᴏᴛ ⚡"
     )
 
-def download_progress_text(received: int, total: int, speed: float = 0, eta: float | None = None, filename: str = "") -> str:
+def download_progress_text(received: int, total: int, speed: float = 0, eta: float | None = None, filename: str = "", source_url: str | None = None) -> str:
     percent = 100.0 if total <= 0 else min(100.0, (received * 100.0 / total))
     width = 15
     filled = round(width * (percent / 100.0))
     bar = "⬢" * filled + "⬡" * (width - filled)
-    safe_name = (filename or "Archivo").strip()[:40]
+    header = format_media_header(filename, source_url)
     eta_str = f"{int(eta)}s" if (eta is not None and eta > 0) else "Calculando..."
     rec_mb = f"{received / (1024 * 1024):.1f} MB"
     total_mb = f"{total / (1024 * 1024):.1f} MB" if total > 0 else "Desconocido"
     speed_mb = f"{max(0.1, speed):.1f} MB/s" if speed > 0 else "0.0 MB/s"
 
     return (
-        f"📄 <b>{safe_name}</b>\n\n"
+        f"{header}\n\n"
         f"┎ 📥 ᴅᴇꜱᴄᴀʀɢᴀɴᴅᴏ ʀᴇᴄᴜʀꜱᴏ\n"
         f"┠ |{bar}|\n"
         f"┠ ᴘᴏʀᴄᴇɴᴛᴀᴊᴇ: {percent:.2f}%\n"
         f"┠ ᴘʀᴏᴄᴇꜱᴀᴅᴏ: {rec_mb}/{total_mb}\n"
         f"┠ ᴠᴇʟᴏᴄɪᴅᴀᴅ: {speed_mb}\n"
         f"┠ ᴇᴛᴀ: {eta_str}\n"
-        f"┖ ᴍᴏᴛᴏʀ: ᴊᴋ-ᴛᴜʀʙᴏ #worker"
+        f"┖ ꜱɪꜱᴛᴇᴍᴀ: ᴊᴋ ᴅᴏᴡɴ ʙᴏᴛ ⚡"
     )
 
 
@@ -1949,8 +1973,9 @@ async def upload_to_todus_s3_with_progress(
     async def edit_progress(sent, total, speed, eta):
         try:
             await status.edit_text(
-                upload_progress_text(sent, total, speed, eta),
+                upload_progress_text(sent, total, speed, eta, filename=download_name),
                 reply_markup=reply_markup() if callable(reply_markup) else reply_markup,
+                parse_mode=ParseMode.HTML,
             )
         except Exception:
             pass
@@ -2231,11 +2256,11 @@ def transfer_complete_text(filename: str = "", size: int = 0, parts: int = 1,
                            username: str | None = None, user_id: int | None = None,
                            task_id: str | None = None, duration: float | None = None,
                            expires_at: str | None = None) -> str:
-    safe_name = (filename or "archivo")[:42]
+    header_label = format_media_header(filename)
     lines = [
         "Ya está disponible en la nube.",
         "",
-        f"📄 {safe_name}",
+        header_label,
         f"📦 Tamaño: {_size_label(size)}",
         f"⏱️ Duración: {_duration_label(duration)}",
         f"☁️ Enlace expira: {expiry_label(expires_at)}",
@@ -2515,10 +2540,19 @@ async def process_task(job: TransferTask, application: Application) -> None:
         elapsed = max(0.1, now - progress_state["started"])
         speed = received / MIB / elapsed
         eta = (total - received) / (speed * MIB) if total and speed > 0 else None
+        curr_fname = job.filename or ""
+        if not curr_fname and job.source_message:
+            for mtype in ("document", "video", "audio", "animation", "photo"):
+                m = getattr(job.source_message, mtype, None)
+                if m:
+                    curr_fname = getattr(m, "file_name", None) or ("photo.jpg" if mtype == "photo" else "")
+                    if curr_fname:
+                        break
         try:
             await job.status_message.edit_text(
-                download_progress_text(received, total, speed, eta),
+                download_progress_text(received, total, speed, eta, filename=curr_fname, source_url=job.source_url),
                 reply_markup=task_keyboard(job),
+                parse_mode=ParseMode.HTML,
             )
         except Exception:
             pass
@@ -2649,8 +2683,9 @@ async def process_task(job: TransferTask, application: Application) -> None:
             if part_total:
                 try:
                     await job.status_message.edit_text(
-                        upload_progress_text(0, part_total),
+                        upload_progress_text(0, part_total, filename=part_name),
                         reply_markup=task_keyboard(job),
+                        parse_mode=ParseMode.HTML,
                     )
                 except Exception:
                     pass

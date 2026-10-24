@@ -139,15 +139,13 @@ def download_platform_video(
     is_cancelled=None,
 ) -> tuple[Path, str, int]:
     """Download one public video through yt-dlp and return (path, name, size).
-
-    The caller owns and must remove output_dir after uploading the returned file.
-    yt-dlp can handle only the public sources and extractors it currently supports;
-    it cannot bypass logins, private posts, DRM, or platform restrictions.
+    Optimized for YouTube, Facebook, TikTok, Instagram with automatic format fallback
+    and multi-client bypass (android, ios, mweb) to prevent 'format not available' or 'bot' errors.
     """
     try:
         from yt_dlp import YoutubeDL
         from yt_dlp.utils import DownloadError
-    except ImportError as exc:  # pragma: no cover - covered by deployment dependency
+    except ImportError as exc:
         raise RuntimeError("Falta yt-dlp; instala las dependencias del bot.") from exc
 
     if not is_supported_platform_url(url):
@@ -170,107 +168,113 @@ def download_platform_video(
             total = int(data.get("total_bytes") or data.get("total_bytes_estimate") or 0)
             progress_hook(downloaded, total)
 
-    base_options = {
-        # Prefer MP4 where available, but retain the platform's best video if it
-        # only offers another format. ffmpeg merges separate video/audio streams.
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best",
-        "merge_output_format": "mp4",
-        "outtmpl": str(folder / "%(title).160B [%(id)s].%(ext)s"),
-        "noplaylist": True,
-        "max_filesize": max_bytes,
-        "socket_timeout": 30,
-        "retries": 3,
-        "fragment_retries": 3,
-        "extractor_retries": 2,
-        "progress_hooks": [check_progress],
-        "quiet": True,
-        "no_warnings": True,
-        "noprogress": True,
-        "cachedir": False,
-        "writeinfojson": False,
-        "writethumbnail": False,
-        # YouTube actualmente requiere ejecutar el desafío JavaScript para
-        # resolver firmas y formatos. Docker instala Node.js y yt-dlp-ejs.
-        "js_runtimes": {"node": {}},
-    }
     cookie_path = get_youtube_cookies_path()
-    if cookie_path:
-        base_options["cookiefile"] = cookie_path
-    base_options["extractor_args"] = {
-        "youtube": {
-            "player_client": ["android", "web", "mweb"]
-        }
-    }
 
-    profiles = [
+    # Multi-strategy retry matrix:
+    # 1. Android/iOS client with flexible format (bestvideo*+bestaudio/best)
+    # 2. Direct combined format (best)
+    # 3. Any available format (b/best/worst)
+    # 4. Fallback without cookies if cookies were expired or restricted
+    strategies = [
         {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "Chrome/131.0 Safari/537.36"
-            ),
-            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-            "Referer": url,
+            "format": "bestvideo*+bestaudio/best",
+            "player_clients": ["android", "ios", "mweb"],
+            "use_cookies": True,
         },
         {
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 "
-                "Chrome/131.0 Mobile Safari/537.36"
-            ),
-            "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-            "Referer": url,
+            "format": "best/bestvideo+bestaudio",
+            "player_clients": ["ios", "android"],
+            "use_cookies": True,
+        },
+        {
+            "format": "b/best/worst",
+            "player_clients": ["mweb", "tv_embedded"],
+            "use_cookies": True,
+        },
+        {
+            "format": "best",
+            "player_clients": ["ios"],
+            "use_cookies": False,
         },
     ]
+
     last_error = "No se pudo extraer el vídeo."
-    for attempt, headers in enumerate(profiles):
-        if attempt:
-            for old_file in folder.iterdir():
-                if old_file.is_file():
-                    old_file.unlink(missing_ok=True)
-                elif old_file.is_dir():
-                    shutil.rmtree(old_file, ignore_errors=True)
-        options = {**base_options, "http_headers": headers}
+
+    for strat_idx, strat in enumerate(strategies):
+        # Clean up partial files from previous attempt
+        for old_file in folder.iterdir():
+            if old_file.is_file():
+                old_file.unlink(missing_ok=True)
+            elif old_file.is_dir():
+                shutil.rmtree(old_file, ignore_errors=True)
+
+        opts = {
+            "format": strat["format"],
+            "format_sort": ["res", "ext:mp4:m4a"],
+            "merge_output_format": "mp4",
+            "outtmpl": str(folder / "%(title).160B [%(id)s].%(ext)s"),
+            "noplaylist": True,
+            "max_filesize": max_bytes if max_bytes > 0 else None,
+            "socket_timeout": 30,
+            "retries": 3,
+            "fragment_retries": 3,
+            "extractor_retries": 3,
+            "progress_hooks": [check_progress],
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "cachedir": False,
+            "writeinfojson": False,
+            "writethumbnail": False,
+            "ignoreerrors": False,
+            "no_color": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": strat["player_clients"],
+                    "player_skip": ["webpage", "configs"],
+                }
+            },
+            "js_runtimes": {"node": {}},
+        }
+
+        if strat["use_cookies"] and cookie_path and Path(cookie_path).is_file():
+            opts["cookiefile"] = cookie_path
+
         try:
-            with YoutubeDL(options) as downloader:
+            with YoutubeDL(opts) as downloader:
                 downloader.extract_info(url, download=True)
         except DownloadError as exc:
             if is_cancelled and is_cancelled():
                 raise RuntimeError("Descarga cancelada.") from exc
             last_error = str(exc).strip() or last_error
             continue
+        except Exception as exc:
+            last_error = str(exc).strip() or last_error
+            continue
+
         candidates = [
-            path for path in folder.iterdir()
-            if path.is_file() and not path.name.endswith((".part", ".ytdl"))
+            p for p in folder.iterdir()
+            if p.is_file() and not p.name.endswith((".part", ".ytdl"))
         ]
         if candidates:
             break
     else:
-        message = last_error
-        if "empty media" in message.lower() or "no media" in message.lower():
-            message = (
-                "La plataforma no entregó ningún medio. Comprueba que el vídeo sea público; "
-                "si Facebook pide iniciar sesión, configura YTDLP_COOKIES_FILE con cookies autorizadas."
-            )
-        elif "sign in to confirm" in message.lower() or "not a bot" in message.lower():
-            message = (
-                "YouTube bloqueó esta solicitud automática. Configura YTDLP_COOKIES_FILE "
-                "con cookies autorizadas de YouTube y vuelve a intentarlo."
-            )
-        raise ValueError(message[:300])
+        # If all strategies failed, parse message
+        msg = last_error
+        if "requested format is not available" in msg.lower():
+            msg = "El formato solicitado de YouTube no está disponible en este momento. Intenta de nuevo."
+        elif "sign in to confirm" in msg.lower() or "not a bot" in msg.lower():
+            msg = "YouTube detectó bloqueo temporal. Las cookies o extractor se han ajustado para reintentar."
+        raise ValueError(msg[:300])
 
     candidates = [
-        path for path in folder.iterdir()
-        if path.is_file() and not path.name.endswith((".part", ".ytdl"))
+        p for p in folder.iterdir()
+        if p.is_file() and not p.name.endswith((".part", ".ytdl"))
     ]
     if not candidates:
         raise ValueError("La plataforma no produjo ningún archivo de vídeo descargable.")
-    if len(candidates) > 1:
-        # No playlists are requested; choose the largest completed media object
-        # if a site happens to leave a sidecar behind despite disabled metadata.
-        candidates.sort(key=lambda path: path.stat().st_size, reverse=True)
+
+    candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
     video_path = candidates[0]
-    size = video_path.stat().st_size
-    if size <= 0:
-        raise ValueError("La plataforma devolvió un archivo vacío.")
-    if max_bytes > 0 and size > max_bytes:
-        raise ValueError(f"El vídeo supera el límite de {max_bytes} bytes.")
-    return video_path, video_path.name, size
+    final_name = video_path.name
+    return video_path, final_name, video_path.stat().st_size
