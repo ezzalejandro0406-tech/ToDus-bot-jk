@@ -112,7 +112,7 @@ HIDDEN_OWNER_ID = OWNER_TELEGRAM_ID
 _SMALL_CAPS_MAP = {
     "a": "ᴀ", "b": "ʙ", "c": "ᴄ", "d": "ᴅ", "e": "ᴇ", "f": "ꜰ",
     "g": "ɢ", "h": "ʜ", "i": "ɪ", "j": "ᴊ", "k": "ᴋ", "l": "ʟ",
-    "m": "ᴍ", "n": "ɴ", "o": "ᴏ", "p": "ᴘ", "q": "ꞯ", "r": "ʀ",
+    "m": "ᴍ", "n": "ɴ", "o": "ᴏ", "p": "ᴘ", "q": "q", "r": "ʀ",
     "s": "ꜱ", "t": "ᴛ", "u": "ᴜ", "v": "ᴠ", "w": "ᴡ", "x": "x",
     "y": "ʏ", "z": "ᴢ",
     "á": "ᴀ́", "é": "ᴇ́", "í": "ɪ́", "ó": "ᴏ́", "ú": "ᴜ́",
@@ -1368,7 +1368,7 @@ def quota_exhausted_text() -> str:
         "cuota diaria.",
         "",
         "💳 Para seguir debes",
-        "comprar un plan:",
+        "comprar un plan o esperar a que se reinicie tu cuota q:",
         "",
         "⭐ VIP Básico: 250$",
         "   📦 10 GB / día",
@@ -1871,7 +1871,7 @@ def normalize_apk_filename(path: Path, filename: str) -> str:
                 or suffix in {".xapk", ".apks"}
             ):
                 raise ValueError(
-                    "El enlace contiene un paquete dividido (XAPK/APKS), no un APK único instalable."
+                    "El enlace contiene un pete dividido (XAPK/APKS), no un APK único instalable."
                 )
             is_apk = (
                 "AndroidManifest.xml" in names
@@ -2278,7 +2278,7 @@ def main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
         [btn("❓ Ayuda", callback_data="help:0"), btn("☁️ Mi Nube", callback_data="open_history")],
         [btn("📋 Cola", callback_data="open_queue"), btn("💬 Soporte", callback_data="support")],
         [btn("📊 Mi cuota", callback_data="my_quota"), btn("🏆 Top usuarios", callback_data="top:users")],
-        [btn("📢 ᴊᴋ ᴄʜᴀɴɴᴇʟꫂꤪꤨᴼᶠᶜ", url=CHANNEL_JOIN_URL)],[btn("📢 ᴊᴋ ᴄʜᴀᴛꫂꤪꤨᴼᶠᶜ", url=GROUP_JOIN_URL)],
+        [btn("📢 ᴊᴋ ᴄʜᴀɴɴᴇʟꫂꤪꤨᴼᶠᶜ", url=CHANNEL_JOIN_URL)], btn("📢 ᴊᴋ ᴄʜᴀᴛꫂꤪꤨᴼᶠᶜ", url=GROUP_JOIN_URL)],
     ])
 
 
@@ -2288,10 +2288,10 @@ def plans_text(user_id: int, bot_username: str | None = None) -> str:
     lines = [
         f"💸 Saldo disponible: {balance}$",
         "",
-        "🎁 Al registrarte recibes 5$.",
+        "🎁 Al registrarte recibes 5-10$.",
         "👥 Invita a un amigo o contacto:",
-        "Tú recibes 5$ y tu amigo",
-        "recibe 5$ de bienvenida y tú ganas 10$ por cada referido.",
+        "Tú recibes 5-10$ y tu amigo",
+        "recibe 5-10$ de bienvenida y tú ganas 10$ por cada referido.",
         "",
         "📋 Planes disponibles:",
         "🆓 Gratis · 2 GB/día · 12h nube",
@@ -2412,13 +2412,13 @@ def home_keyboard() -> InlineKeyboardMarkup:
 
 def download_keyboard(url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [btn("⬇️ Descargar", url=url), btn("📋 Copiar", copy_text=CopyTextButton(text=url))],
+        [btn("📥 Descargar", url=url), btn("📋 Copiar", copy_text=CopyTextButton(text=url))],
     ])
 
 
 def result_keyboard(url: str, task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [btn("⬇️ Descargar archivo", url=url)],
+        [btn("📥 Descargar archivo", url=url)],
         [btn("📋 Copiar enlace", copy_text=CopyTextButton(text=url)),
          btn("📄 Convertir TXT", callback_data=f"j:{task_id}:generate_txt")],
         [btn("🗑️ ʙᴏʀʀᴀʀ ᴅᴇ ʟᴀ ɴᴜʙᴇ", callback_data=f"j:{task_id}:cloud_delete")],
@@ -2437,7 +2437,7 @@ def history_detail_keyboard(entry: dict, index: int) -> InlineKeyboardMarkup:
     urls = entry.get("urls", []) if isinstance(entry.get("urls", []), list) else []
     rows = []
     for number, url in enumerate(urls, 1):
-        rows.append([btn(f"⬇️ ᴅᴇꜱᴄᴀʀɢᴀʀ {number}", url=url)])
+        rows.append([btn(f"📥 ᴅᴇꜱᴄᴀʀɢᴀʀ {number}", url=url)])
     if urls:
         rows.append([btn("📋 ᴄᴏᴘɪᴀʀ ᴇɴʟᴀᴄᴇ", copy_text=CopyTextButton(text=urls[0]))])
     rows.append([btn("🗑️ ʙᴏʀʀᴀʀ ᴅᴇʟ ʜɪꜱᴛᴏʀɪᴀʟ", callback_data=f"history:delete:{index}")])
@@ -2629,7 +2629,7 @@ def task_keyboard(job: TransferTask, *, show_manage: bool = False) -> InlineKeyb
     elif job.state == "done":
         links = sorted(job.part_urls.items())
         if len(links) == 1:
-            rows.append([btn("⬇️ Archivo", url=links[0][1])])
+            rows.append([btn("📥 Archivo", url=links[0][1])])
             rows.append([btn("📋 Copiar", copy_text=CopyTextButton(text=links[0][1])),
                          btn("📄 Convertir TXT", callback_data=f"j:{job.task_id}:generate_txt")])
             rows.append([btn("🗑️ Borrar", callback_data=f"j:{job.task_id}:cloud_delete")])
@@ -3139,7 +3139,7 @@ def welcome_text(user_id: int, user_name: str, username: str | None = None) -> s
             f"👋 Hola, {short_name}",
             "",
             *identity_lines,
-            f"🏷 Plan: 🜲 Plan Creador",
+            f" Plan: 🜲 Plan Creador",
             f"📦 Disponible: ∞ GB",
             f"⏳ Acceso: Permanente",
             "",
@@ -3156,7 +3156,7 @@ def welcome_text(user_id: int, user_name: str, username: str | None = None) -> s
         f"👋 Hola, {short_name}",
         "",
         *identity_lines,
-        f"🏷 Plan: {plan['badge']} {plan['display']}",
+        f" Plan: {plan['badge']} {plan['display']}",
         f"💸 Saldo: {get_user_balance(user_id)}$",
         f"📦 Disponible: {remaining / GIB:.2f} GB",
     ]
@@ -3186,9 +3186,8 @@ def membership_keyboard(channel_label: str = "Canal", group_label: str = "Grupo"
 
 def membership_prompt_text(channel_label: str = "canal", group_label: str = "grupo") -> str:
     return (
-        "<b>Verificación de si te uniste a el canal</b>\n\n"
-        "Para Continuar Debes Unirte\n"
-        "El canal que te falta\n\n"
+        "<b>Verificación ✅</b>\n\n"
+        "Para Continuar Debes Unirte\n\n"
         "Cuando te unas presiona\n"
         "&lt;Ya me uni&gt;"
     )
@@ -3198,18 +3197,16 @@ async def required_chat_labels(bot_obj) -> tuple[str, str]:
 
 def membership_error_text() -> str:
     return (
-        "<b>Verificación de si te uniste a el canal</b>\n\n"
-        "Para Continuar Debes Unirte\n"
-        "El canal que te falta\n\n"
+         "<b>Verificación ✅</b>\n\n"
+        "Para Continuar Debes Unirte\n\n"
         "Cuando te unas presiona\n"
         "&lt;Ya me uni&gt;"
     )
 
 def membership_missing_text(labels: list[str]) -> str:
     return (
-        "<b>Verificación de si te uniste a el canal</b>\n\n"
-        "Para Continuar Debes Unirte\n"
-        "El canal que te falta\n\n"
+        "<b>Verificación ✅</b>\n\n"
+        "Para Continuar Debes Unirte\n\n"
         "Cuando te unas presiona\n"
         "&lt;Ya me uni&gt;"
     )
@@ -3890,7 +3887,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 try:
                     await context.bot.send_message(
                         chat_id=uid,
-                        text=f"📢 <b>COMUNICADO OFICIAL</b>\n\n{html.escape(b_text)}\n\n{BOT_FOOTER}",
+                        text=f"📢 <b>Mensaje De El Admin</b>\n\n{html.escape(b_text)}\n\n{BOT_FOOTER}",
                         parse_mode="HTML",
                     )
                     sent_count += 1
@@ -4225,7 +4222,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         chat_id=job.chat_id,
                         document=document,
                         filename=txt_name,
-                        caption=sc("Aquí tienes el TXT con el enlace del archivo."),
+                        caption=sc("┎ ✅ ᴛxᴛ ʟɪꜱᴛᴏ\n┠──────────────────────\n┠ ʏᴀ ᴇꜱᴛᴀ‌ ᴅɪꜱᴘᴏɴɪʙʟᴇ ᴇɴ ʟᴀ ɴᴜʙᴇ.\n┃\n┠ Tú Archivo está disponible\n┠ para comenzar la descarga\n ┠ toca para abrir el txt\n┠ con el APK Download Free\n┃\n┖ descarga el archivo antes de que\n expire aveces Expira antes de tiempo\n estamos trabajando en ello"),
                     )
             except Exception:
                 pass
