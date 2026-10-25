@@ -9,11 +9,12 @@ from pathlib import Path
 from urllib.parse import quote
 
 import requests
+from requests.adapters import HTTPAdapter
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 TODUS_S3_BASE_URL = "https://s3.todus.cu/stream"
-CHUNK_SIZE = 64 * 1024
+CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB para máxima velocidad de subida a ToDus S3
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2
 mimetypes.add_type("application/vnd.android.package-archive", ".apk")
@@ -206,6 +207,9 @@ def upload_to_todus_s3(
     last_error: Exception | None = None
 
     with requests.Session() as session:
+        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=1)
+        session.mount('https://', adapter)
+        session.mount('http://', adapter)
         for attempt in range(MAX_RETRIES):
             if is_cancelled and is_cancelled():
                 raise ToDusS3UploadCancelled("Subida cancelada.")
