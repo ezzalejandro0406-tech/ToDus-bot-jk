@@ -2278,7 +2278,7 @@ def main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
         [btn("❓ Ayuda", callback_data="help:0"), btn("☁️ Mi Nube", callback_data="open_history")],
         [btn("📋 Cola", callback_data="open_queue"), btn("💬 Soporte", callback_data="support")],
         [btn("📊 Mi cuota", callback_data="my_quota"), btn("🏆 Top usuarios", callback_data="top:users")],
-        [btn("📢 ᴊᴋ ᴄʜᴀɴɴᴇʟꫂꤪꤨᴼᶠᶜ", url=CHANNEL_JOIN_URL)], btn("📢 ᴊᴋ ᴄʜᴀᴛꫂꤪꤨᴼᶠᶜ", url=GROUP_JOIN_URL)],
+        [btn("📢 ᴊᴋ ᴄʜᴀɴɴᴇʟꫂꤪꤨᴼᶠᶜ", url=CHANNEL_JOIN_URL)],[btn("📢 ᴊᴋ ᴄʜᴀᴛꫂꤪꤨᴼᶠᶜ", url=GROUP_JOIN_URL)],
     ])
 
 
