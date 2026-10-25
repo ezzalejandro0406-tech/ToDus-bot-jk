@@ -113,7 +113,7 @@ _SMALL_CAPS_MAP = {
     "a": "ᴀ", "b": "ʙ", "c": "ᴄ", "d": "ᴅ", "e": "ᴇ", "f": "ꜰ",
     "g": "ɢ", "h": "ʜ", "i": "ɪ", "j": "ᴊ", "k": "ᴋ", "l": "ʟ",
     "m": "ᴍ", "n": "ɴ", "o": "ᴏ", "p": "ᴘ", "q": "ꞯ", "r": "ʀ",
-    "s": "ꜱ", "t": "ᴛ", "u": "ᴜ", "v": "ᴠ", "w": "ᴡ", "x": "ˣ",
+    "s": "ꜱ", "t": "ᴛ", "u": "ᴜ", "v": "ᴠ", "w": "ᴡ", "x": "x",
     "y": "ʏ", "z": "ᴢ",
     "á": "ᴀ́", "é": "ᴇ́", "í": "ɪ́", "ó": "ᴏ́", "ú": "ᴜ́",
     "ñ": "ɴ̃", "ü": "ᴜ̈",
@@ -2278,7 +2278,7 @@ def main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
         [btn("❓ Ayuda", callback_data="help:0"), btn("☁️ Mi Nube", callback_data="open_history")],
         [btn("📋 Cola", callback_data="open_queue"), btn("💬 Soporte", callback_data="support")],
         [btn("📊 Mi cuota", callback_data="my_quota"), btn("🏆 Top usuarios", callback_data="top:users")],
-        [btn("📢 JK Chanel", url=CHANNEL_JOIN_URL)],
+        [btn("📢 ᴊᴋ ᴄʜᴀɴɴᴇʟꫂꤪꤨᴼᶠᶜ", url=CHANNEL_JOIN_URL)],[btn("📢 ᴊᴋ ᴄʜᴀᴛꫂꤪꤨᴼᶠᶜ", url=GROUP_JOIN_URL)],
     ])
 
 
