@@ -212,7 +212,7 @@ def download_platform_video(
             "format": strat["format"],
             "format_sort": ["res", "ext:mp4:m4a"],
             "merge_output_format": "mp4",
-            "outtmpl": str(folder / "%(title).160B [%(id)s].%(ext)s"),
+            "outtmpl": str(folder / "%(title).120s.%(ext)s"),
             "noplaylist": True,
             "max_filesize": max_bytes if max_bytes > 0 else None,
             "socket_timeout": 30,

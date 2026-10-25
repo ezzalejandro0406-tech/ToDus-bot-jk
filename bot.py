@@ -148,21 +148,30 @@ PROTECTED_PATTERN = re.compile(r"(<[^>]+>|\{mono:[^}]+})")
 
 
 def card(title: str, lines: list[str] | tuple[str, ...]) -> str:
-    """Genera tarjetas con diseño estético y organizado:
-    - Líneas con texto o letras inician con '┠ '
-    - Líneas en blanco o vacías se representan como la línea vertical sola sin la cosita ('│')
-    - Termina en lo que termine el contenido/archivo sin añadir firma o nombre del bot.
+    """Genera tarjetas estéticas con recuadro futurista cerrado:
+    - Arriba izquierda: ┎ <b>{header_title}</b>
+    - Separador: ┠──────────────────────
+    - Líneas con texto o letras: ┠ 
+    - Líneas vacías: |
+    - Abajo izquierda (última línea de contenido): ┖ {último_texto}
+    - Nada queda afuera del recuadro ni lo rompe.
     """
     header_title = sc(title) if "<" not in title else title
-    out = [f"┠ <b>{header_title}</b>"]
-    for line in lines:
-        if line is None:
-            out.append("│")
-            continue
+    flat_lines = []
+    for item in lines:
+        if item is None:
+            flat_lines.append("")
+        elif isinstance(item, str) and chr(10) in item:
+            flat_lines.extend(item.split(chr(10)))
+        else:
+            flat_lines.append(str(item))
+
+    raw_items = []
+    for line in flat_lines:
         line_str = str(line)
         clean_check = line_str.strip()
         if not clean_check or clean_check in {"│", "|", "┠", "┠──────────────────────", "----------------------"}:
-            out.append("│")
+            raw_items.append("|")
             continue
         protected_parts = []
 
@@ -181,19 +190,40 @@ def card(title: str, lines: list[str] | tuple[str, ...]) -> str:
 
         clean_line = protected.strip()
         if not clean_line or clean_line in {"│", "|"}:
-            out.append("│")
-        elif clean_line.startswith("┠ "):
-            out.append(clean_line)
-        elif clean_line.startswith("┠"):
-            out.append(f"┠ {clean_line[1:].strip()}")
-        elif clean_line.startswith("|- "):
-            out.append(f"┠ {clean_line[3:].strip()}")
-        elif clean_line.startswith("|-"):
-            out.append(f"┠ {clean_line[2:].strip()}")
+            raw_items.append("|")
         else:
-            out.append(f"┠ {clean_line}")
+            if clean_line.startswith("┠ "):
+                clean_line = clean_line[2:].strip()
+            elif clean_line.startswith("┠"):
+                clean_line = clean_line[1:].strip()
+            elif clean_line.startswith("┖ "):
+                clean_line = clean_line[2:].strip()
+            elif clean_line.startswith("┖"):
+                clean_line = clean_line[1:].strip()
+            elif clean_line.startswith("|- "):
+                clean_line = clean_line[3:].strip()
+            elif clean_line.startswith("|-"):
+                clean_line = clean_line[2:].strip()
+            raw_items.append(clean_line)
 
-    # Termina en el último dato o archivo, sin sufijo del bot
+    while raw_items and raw_items[-1] == "|":
+        raw_items.pop()
+
+    last_content_idx = -1
+    for i in range(len(raw_items) - 1, -1, -1):
+        if raw_items[i] != "|":
+            last_content_idx = i
+            break
+
+    out = [f"┎ <b>{header_title}</b>", "┠──────────────────────"]
+    for i, it in enumerate(raw_items):
+        if it == "|":
+            out.append("|")
+        elif i == last_content_idx:
+            out.append(f"┖ {it}")
+        else:
+            out.append(f"┠ {it}")
+
     return "\n".join(out)
 
 
@@ -1950,25 +1980,20 @@ def upload_progress_text(sent: int, total: int, speed: float = 0, eta: float | N
     total_mb = f"{total / (1024 * 1024):.1f} MB" if total > 0 else "Desconocido"
     speed_mb = f"{max(0.1, speed):.1f} MB/s" if speed > 0 else "0.0 MB/s"
 
-    lines = [
-        "📤 <b>ꜱᴜʙɪᴇɴᴅᴏ ᴀ ᴛᴏᴅᴜꜱ ꜱ3</b>",
+    out = [
+        "┎ 📤 <b>ꜱᴜʙɪᴇɴᴅᴏ ᴀ ᴛᴏᴅᴜꜱ ꜱ3</b>",
+        "┠──────────────────────",
     ]
     if header:
-        lines.append(header)
-    lines.extend([
-        "",
-        f"|{bar}|",
-        f"ᴘᴏʀᴄᴇɴᴛᴀᴊᴇ: {percent:.2f}%",
-        f"ᴘʀᴏᴄᴇꜱᴀᴅᴏ: {sent_mb}/{total_mb}",
-        f"ᴠᴇʟᴏᴄɪᴅᴀᴅ ᴅᴇ ꜱᴜʙɪᴅᴀ: {speed_mb}",
-        f"ᴇᴛᴀ: {eta_str}",
+        out.append(f"┠ {header}")
+    out.extend([
+        "|",
+        f"┠ |{bar}|",
+        f"┠ ᴘᴏʀᴄᴇɴᴛᴀᴊᴇ: {percent:.2f}%",
+        f"┠ ᴘʀᴏᴄᴇꜱᴀᴅᴏ: {sent_mb}/{total_mb}",
+        f"┠ ᴠᴇʟᴏᴄɪᴅᴀᴅ ᴅᴇ ꜱᴜʙɪᴅᴀ: {speed_mb}",
+        f"┖ ᴇᴛᴀ: {eta_str}",
     ])
-    out = []
-    for line in lines:
-        if not line or not str(line).strip() or str(line).strip() in {"│", "|"}:
-            out.append("│")
-        else:
-            out.append(f"┠ {line}")
     return "\n".join(out)
 
 
@@ -1983,25 +2008,20 @@ def download_progress_text(received: int, total: int, speed: float = 0, eta: flo
     total_mb = f"{total / (1024 * 1024):.1f} MB" if total > 0 else "Desconocido"
     speed_mb = f"{max(0.1, speed):.1f} MB/s" if speed > 0 else "0.0 MB/s"
 
-    lines = [
-        "📥 <b>ᴅᴇꜱᴄᴀʀɢᴀɴᴅᴏ ʀᴇᴄᴜʀꜱᴏ</b>",
+    out = [
+        "┎ 📥 <b>ᴅᴇꜱᴄᴀʀɢᴀɴᴅᴏ ʀᴇᴄᴜʀꜱᴏ</b>",
+        "┠──────────────────────",
     ]
     if header:
-        lines.append(header)
-    lines.extend([
-        "",
-        f"|{bar}|",
-        f"ᴘᴏʀᴄᴇɴᴛᴀᴊᴇ: {percent:.2f}%",
-        f"ᴘʀᴏᴄᴇꜱᴀᴅᴏ: {rec_mb}/{total_mb}",
-        f"ᴠᴇʟᴏᴄɪᴅᴀᴅ ᴅᴇ ᴅᴇꜱᴄᴀʀɢᴀ: {speed_mb}",
-        f"ᴇᴛᴀ: {eta_str}",
+        out.append(f"┠ {header}")
+    out.extend([
+        "|",
+        f"┠ |{bar}|",
+        f"┠ ᴘᴏʀᴄᴇɴᴛᴀᴊᴇ: {percent:.2f}%",
+        f"┠ ᴘʀᴏᴄᴇꜱᴀᴅᴏ: {rec_mb}/{total_mb}",
+        f"┠ ᴠᴇʟᴏᴄɪᴅᴀᴅ ᴅᴇ ᴅᴇꜱᴄᴀʀɢᴀ: {speed_mb}",
+        f"┖ ᴇᴛᴀ: {eta_str}",
     ])
-    out = []
-    for line in lines:
-        if not line or not str(line).strip() or str(line).strip() in {"│", "|"}:
-            out.append("│")
-        else:
-            out.append(f"┠ {line}")
     return "\n".join(out)
 
 
