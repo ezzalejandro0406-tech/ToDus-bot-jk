@@ -126,12 +126,12 @@ for k, v in _SMALL_CAPS_MAP.items():
 SMALL_CAPS = str.maketrans(_SMALL_CAPS_FULL)
 
 PRESERVED_UI_TOKEN = re.compile(
-    r"(https?://[^\s<>]+|@[a-zA-Z0-9_]+|\x00MONO\d+\x00|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b|/[a-zA-Z0-9_]+|\b\d+\b)"
+    r"(https?://[^\s<>]+|@[a-zA-Z0-9_]+|\x00[^\x00]+\x00|<[^>]+>|\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b|/[a-zA-Z0-9_]+|\b\d+\b)"
 )
 
 
 def sc(value: str) -> str:
-    """Convierte texto a small caps preservando URLs, comandos, números y @usuarios."""
+    """Convierte texto a small caps (estilo ᴇѕᴛᴇ) preservando enlaces, comandos, números, tags y @usuarios."""
     if not value:
         return value
     chunks = PRESERVED_UI_TOKEN.split(str(value))
@@ -152,9 +152,10 @@ def card(title: str, lines: list[str] | tuple[str, ...]) -> str:
     - Arriba izquierda: ┎ <b>{header_title}</b>
     - Separador: ┠──────────────────────
     - Líneas con texto o letras: ┠ 
-    - Líneas vacías: |
+    - Líneas vacías: ┃ (línea vertical gruesa del mismo grosor que ┎, ┠ y ┖)
     - Abajo izquierda (última línea de contenido): ┖ {último_texto}
     - Nada queda afuera del recuadro ni lo rompe.
+    - Tipografía estilizada ᴇѕᴛᴇ preservando enlaces y menciones.
     """
     header_title = sc(title) if "<" not in title else title
     flat_lines = []
@@ -170,8 +171,8 @@ def card(title: str, lines: list[str] | tuple[str, ...]) -> str:
     for line in flat_lines:
         line_str = str(line)
         clean_check = line_str.strip()
-        if not clean_check or clean_check in {"│", "|", "┠", "┠──────────────────────", "----------------------"}:
-            raw_items.append("|")
+        if not clean_check or clean_check in {"┃", "│", "|", "┠", "┠──────────────────────", "----------------------"}:
+            raw_items.append("┃")
             continue
         protected_parts = []
 
@@ -189,8 +190,8 @@ def card(title: str, lines: list[str] | tuple[str, ...]) -> str:
             protected = protected.replace(f"\x00__{i_idx}__\x00", val)
 
         clean_line = protected.strip()
-        if not clean_line or clean_line in {"│", "|"}:
-            raw_items.append("|")
+        if not clean_line or clean_line in {"┃", "│", "|"}:
+            raw_items.append("┃")
         else:
             if clean_line.startswith("┠ "):
                 clean_line = clean_line[2:].strip()
@@ -204,21 +205,21 @@ def card(title: str, lines: list[str] | tuple[str, ...]) -> str:
                 clean_line = clean_line[3:].strip()
             elif clean_line.startswith("|-"):
                 clean_line = clean_line[2:].strip()
-            raw_items.append(clean_line)
+            raw_items.append(sc(clean_line))
 
-    while raw_items and raw_items[-1] == "|":
+    while raw_items and raw_items[-1] == "┃":
         raw_items.pop()
 
     last_content_idx = -1
     for i in range(len(raw_items) - 1, -1, -1):
-        if raw_items[i] != "|":
+        if raw_items[i] != "┃":
             last_content_idx = i
             break
 
     out = [f"┎ <b>{header_title}</b>", "┠──────────────────────"]
     for i, it in enumerate(raw_items):
-        if it == "|":
-            out.append("|")
+        if it == "┃":
+            out.append("┃")
         elif i == last_content_idx:
             out.append(f"┖ {it}")
         else:
@@ -346,6 +347,8 @@ HISTORY_DATA_FILE = str(DATA_DIR / "task_history.json")
 USERS_DATA_FILE = str(DATA_DIR / "users.json")
 ADMIN_AUDIT_FILE = str(DATA_DIR / "admin_audit.json")
 TELEGRAM_AUTH_DIR = DATA_DIR / "telegram_auth"
+CLOUD_CACHE_DIR = DATA_DIR / "cloud_cache"
+CLOUD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1135,7 +1138,7 @@ def expire_cloud_files() -> int:
         if not isinstance(entries, list):
             continue
         for entry in entries:
-            if not isinstance(entry, dict) or not entry.get("expires_at") or not entry.get("urls"):
+            if not isinstance(entry, dict) or not entry.get("expires_at"):
                 continue
             try:
                 exp_dt = datetime.fromisoformat(entry["expires_at"])
@@ -1152,7 +1155,16 @@ def expire_cloud_files() -> int:
                     delete_from_todus_s3(url)
                 except Exception:
                     success = False
-            if success:
+            # Purgar caché local del disco al culminar el tiempo del plan
+            for cp in entry.get("cached_paths", []):
+                try:
+                    Path(cp).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            if entry.get("cached_paths"):
+                entry["cached_paths"] = []
+                changed = True
+            if success and urls:
                 entry["urls"] = []
                 entry["cloud_expired_at"] = now.isoformat()
                 removed += len(urls)
@@ -1162,9 +1174,142 @@ def expire_cloud_files() -> int:
     return removed
 
 
+def check_cloud_url_healthy(url: str, timeout: int = 8) -> bool:
+    """Verifica si el enlace en ToDus S3 sigue respondiendo activamente."""
+    try:
+        from todus_s3_storage import check_todus_url_alive
+        return check_todus_url_alive(url, timeout_seconds=timeout)
+    except Exception:
+        return True
+
+
+async def _silently_update_message_keyboard(
+    application: Application,
+    chat_id: int | str,
+    message_id: int | str,
+    task_id: str,
+    new_urls: list[str],
+) -> None:
+    """Actualiza en silencio los botones del mensaje de Telegram con el nuevo enlace renovado."""
+    try:
+        if not new_urls:
+            return
+        if len(new_urls) == 1:
+            kb = result_keyboard(new_urls[0], task_id)
+        else:
+            kb = result_multi_keyboard(task_id)
+        await application.bot.edit_message_reply_markup(
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=kb,
+        )
+    except Exception:
+        pass
+
+
+def renew_prematurely_deleted_cloud_files(application: Application | None = None) -> int:
+    """Detecta archivos borrados en ToDus S3 antes de culminar el tiempo del plan
+    (ej. plan Free de 12h borrado en ToDus a las 2h) y los vuelve a subir en silencio,
+    renovando el archivo y manteniendo el servicio 100% activo sin fallos.
+    """
+    data = all_task_history()
+    now = datetime.now(timezone.utc)
+    renewed_count = 0
+    changed = False
+
+    for user_id_str, entries in data.items():
+        if not isinstance(entries, list):
+            continue
+        try:
+            user_id = int(user_id_str)
+        except ValueError:
+            continue
+
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("expires_at"):
+                continue
+            try:
+                exp_dt = datetime.fromisoformat(entry["expires_at"])
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+
+            # Si ya culminó formalmente el plan, no se renueva
+            if exp_dt <= now:
+                continue
+
+            urls = entry.get("urls", [])
+            cached_paths = entry.get("cached_paths", [])
+            if not urls or not cached_paths:
+                continue
+
+            # Comprobar si ToDus borró el enlace antes de tiempo
+            needs_renewal = False
+            for url in urls:
+                if not check_cloud_url_healthy(url):
+                    needs_renewal = True
+                    break
+
+            if needs_renewal:
+                log.info(
+                    "🛡️ Cloud Guardian: Archivo '%s' (user %s) borrado antes de tiempo en ToDus. Re-subiendo en silencio...",
+                    entry.get("filename"), user_id,
+                )
+                new_urls = []
+                renewal_success = True
+                for idx, cp_str in enumerate(cached_paths):
+                    cp = Path(cp_str)
+                    if not cp.is_file() or cp.stat().st_size == 0:
+                        renewal_success = False
+                        break
+                    try:
+                        part_fname = entry.get("filename", "file.bin")
+                        if len(cached_paths) > 1:
+                            part_fname = f"{part_fname}.part{idx+1}"
+                        new_url, _ = upload_to_todus_s3(
+                            path=cp,
+                            download_name=part_fname,
+                            telegram_user_id=user_id,
+                            timeout_seconds=7200,
+                        )
+                        new_urls.append(new_url)
+                    except Exception as err:
+                        log.warning("Fallo al re-subir silenciosamente a ToDus: %s", err)
+                        renewal_success = False
+                        break
+
+                if renewal_success and new_urls:
+                    entry["urls"] = new_urls
+                    entry["silently_renewed_at"] = now.isoformat()
+                    renewed_count += 1
+                    changed = True
+                    log.info("✅ Cloud Guardian: Archivo renovado con éxito para usuario %s. Nuevos URLs: %s", user_id, new_urls)
+                    if application and entry.get("chat_id") and entry.get("message_id"):
+                        asyncio.create_task(
+                            _silently_update_message_keyboard(
+                                application,
+                                entry["chat_id"],
+                                entry["message_id"],
+                                entry.get("task_id", ""),
+                                new_urls,
+                            )
+                        )
+
+    if changed:
+        _save_json(HISTORY_DATA_FILE, data)
+    return renewed_count
+
+
 async def delete_history_entry_cloud(entry: dict) -> bool:
     urls = entry.get("urls", []) if isinstance(entry, dict) else []
     urls = urls if isinstance(urls, list) else []
+    for cp in entry.get("cached_paths", []):
+        try:
+            Path(cp).unlink(missing_ok=True)
+        except Exception:
+            pass
+    entry["cached_paths"] = []
     if not urls:
         return True
     results = await asyncio.gather(*(
@@ -1176,14 +1321,20 @@ async def delete_history_entry_cloud(entry: dict) -> bool:
 async def cloud_expiration_monitor(application: Application) -> None:
     while True:
         try:
+            # 1. Renueva archivos que ToDus S3 haya borrado antes de finalizar el conteo del plan
+            renewed = await asyncio.to_thread(renew_prematurely_deleted_cloud_files, application)
+            if renewed:
+                log.info("🛡️ Cloud Guardian: %d archivos auto-renovados en silencio.", renewed)
+
+            # 2. Expira y limpia archivos cuyo plan sí culminó formalmente
             removed = await asyncio.to_thread(expire_cloud_files)
-            if removed:
-                schedule_data_backup(application, "expiración de enlaces en ToDus")
+            if removed or renewed:
+                schedule_data_backup(application, "mantenimiento y auto-renovación de enlaces")
         except asyncio.CancelledError:
             raise
-        except Exception:
-            pass
-        await asyncio.sleep(300)
+        except Exception as exc:
+            log.warning("Error en monitor Cloud Guardian: %s", exc)
+        await asyncio.sleep(120)
 
 
 def clear_all_task_history() -> int:
@@ -1981,17 +2132,17 @@ def upload_progress_text(sent: int, total: int, speed: float = 0, eta: float | N
     speed_mb = f"{max(0.1, speed):.1f} MB/s" if speed > 0 else "0.0 MB/s"
 
     out = [
-        "┎ 📤 <b>ꜱᴜʙɪᴇɴᴅᴏ ᴀ ᴛᴏᴅᴜꜱ ꜱ3</b>",
+        "┎ 📤 <b>ѕᴜʙɪᴇɴᴅᴏ ᴀ ᴛᴏᴅᴜѕ ѕ3</b>",
         "┠──────────────────────",
     ]
     if header:
         out.append(f"┠ {header}")
     out.extend([
-        "|",
+        "┃",
         f"┠ |{bar}|",
         f"┠ ᴘᴏʀᴄᴇɴᴛᴀᴊᴇ: {percent:.2f}%",
-        f"┠ ᴘʀᴏᴄᴇꜱᴀᴅᴏ: {sent_mb}/{total_mb}",
-        f"┠ ᴠᴇʟᴏᴄɪᴅᴀᴅ ᴅᴇ ꜱᴜʙɪᴅᴀ: {speed_mb}",
+        f"┠ ᴘʀᴏᴄᴇѕᴀᴅᴏ: {sent_mb}/{total_mb}",
+        f"┠ ᴠᴇʟᴏᴄɪᴅᴀᴅ ᴅᴇ ѕᴜʙɪᴅᴀ: {speed_mb}",
         f"┖ ᴇᴛᴀ: {eta_str}",
     ])
     return "\n".join(out)
@@ -2009,17 +2160,17 @@ def download_progress_text(received: int, total: int, speed: float = 0, eta: flo
     speed_mb = f"{max(0.1, speed):.1f} MB/s" if speed > 0 else "0.0 MB/s"
 
     out = [
-        "┎ 📥 <b>ᴅᴇꜱᴄᴀʀɢᴀɴᴅᴏ ʀᴇᴄᴜʀꜱᴏ</b>",
+        "┎ 📥 <b>ᴅᴇѕᴄᴀʀɢᴀɴᴅᴏ ʀᴇᴄᴜʀѕᴏ</b>",
         "┠──────────────────────",
     ]
     if header:
         out.append(f"┠ {header}")
     out.extend([
-        "|",
+        "┃",
         f"┠ |{bar}|",
         f"┠ ᴘᴏʀᴄᴇɴᴛᴀᴊᴇ: {percent:.2f}%",
-        f"┠ ᴘʀᴏᴄᴇꜱᴀᴅᴏ: {rec_mb}/{total_mb}",
-        f"┠ ᴠᴇʟᴏᴄɪᴅᴀᴅ ᴅᴇ ᴅᴇꜱᴄᴀʀɢᴀ: {speed_mb}",
+        f"┠ ᴘʀᴏᴄᴇѕᴀᴅᴏ: {rec_mb}/{total_mb}",
+        f"┠ ᴠᴇʟᴏᴄɪᴅᴀᴅ ᴅᴇ ᴅᴇѕᴄᴀʀɢᴀ: {speed_mb}",
         f"┖ ᴇᴛᴀ: {eta_str}",
     ])
     return "\n".join(out)
@@ -2767,6 +2918,20 @@ async def process_task(job: TransferTask, application: Application) -> None:
         except Exception:
             pass
 
+        # Guardar en CLOUD_CACHE_DIR para auto-renovación silenciosa durante todo el plan
+        cached_paths = []
+        try:
+            CLOUD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            source_files = job.part_paths if (job.part_paths and len(job.part_paths) > 1) else ([temp_path] if temp_path else [])
+            for idx, p in enumerate(source_files):
+                if p and Path(p).is_file():
+                    safe_part_name = clean_filename(Path(p).name)
+                    target_cache = CLOUD_CACHE_DIR / f"{job.task_id}_p{idx}_{safe_part_name}"
+                    shutil.copy2(p, target_cache)
+                    cached_paths.append(str(target_cache))
+        except Exception as cache_err:
+            log.warning("Aviso guardando en cloud cache: %s", cache_err)
+
         completed_at = datetime.now(timezone.utc)
         expires_at = storage_expiry(job.user_id, completed_at).isoformat()
         try:
@@ -2781,6 +2946,9 @@ async def process_task(job: TransferTask, application: Application) -> None:
                 "storage_duration_hours": get_plan_info(get_user_plan(job.user_id)).get("storage_hours", 12),
                 "duration": max(0, job.updated_at - job.created_at),
                 "state": "done",
+                "cached_paths": cached_paths,
+                "chat_id": getattr(job.status_message, "chat_id", None) if job.status_message else None,
+                "message_id": getattr(job.status_message, "message_id", None) if job.status_message else None,
             })
         except Exception:
             pass

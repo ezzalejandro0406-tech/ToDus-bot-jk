@@ -14,10 +14,33 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 TODUS_S3_BASE_URL = "https://s3.todus.cu/stream"
-CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB para máxima velocidad de subida a ToDus S3
+CHUNK_SIZE = 16 * 1024 * 1024  # 16 MB para máxima velocidad de subida a ToDus S3
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2
 mimetypes.add_type("application/vnd.android.package-archive", ".apk")
+
+
+def check_todus_url_alive(url: str, *, timeout_seconds: int = 8) -> bool:
+    """Verifica rápidamente si el archivo en ToDus S3 sigue existiendo y accesible."""
+    headers = {
+        "User-Agent": "JK-Telegram-Bot/1.0",
+        "Range": "bytes=0-0",
+        "Cache-Control": "no-cache, no-store",
+    }
+    try:
+        resp = requests.head(url, headers=headers, timeout=timeout_seconds, allow_redirects=True)
+        if resp.status_code in {200, 206}:
+            return True
+        if resp.status_code in {404, 410}:
+            return False
+        # Si el servidor responde 405 Method Not Allowed a HEAD, intentamos GET con Range de 1 byte
+        resp_get = requests.get(url, headers=headers, timeout=timeout_seconds, stream=True, allow_redirects=True)
+        is_ok = resp_get.status_code in {200, 206}
+        resp_get.close()
+        return is_ok
+    except Exception:
+        # Errores temporales de red no los interpretamos como borrado
+        return True
 
 
 class ToDusS3UploadError(RuntimeError):
