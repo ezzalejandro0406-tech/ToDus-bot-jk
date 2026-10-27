@@ -647,6 +647,10 @@ def link_user_app(token: str, user_id: int, full_name: str, username: str | None
         data = {}
     balance = get_user_balance(user_id)
     user_handle = f"@{username}" if username else ""
+    user_plan_id = get_user_plan(user_id)
+    plan_info = get_plan_info(user_plan_id)
+    plan_badge = plan_info.get("badge", "🆓")
+    plan_display = plan_info.get("display", "PLAN FREE")
     data[code] = {
         "user_id": user_id,
         "name": full_name or "Usuario Verificado JK",
@@ -655,7 +659,8 @@ def link_user_app(token: str, user_id: int, full_name: str, username: str | None
         "photo_url": photo_url,
         "status": "Verificado · Activo",
         "balance": f"{balance}$ CUP",
-        "quota_plan": f"Plan: {plan['badge']} {plan['display']}",
+        "quota_plan": f"Plan: {plan_badge} {plan_display}",
+        "plan_name": plan_display,
         "linked_at": datetime.now(timezone.utc).isoformat(),
         "creator": "ᴊᴀᴋᴜᴅᴏѕʜʏꫂꤪꤨᴼᶠᶜ",
         "channel": "https://t.me/gg_no_rot",
@@ -1893,7 +1898,11 @@ def upload_to_todus_s3(path: Path, download_name: str, telegram_user_id: int, on
         "Content-Type": content_type,
         "Content-Length": str(size),
         "Content-Disposition": f'{disposition}; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded_name}',
-        "User-Agent": "JK-Telegram-Bot/2.8",
+        "User-Agent": "Wget/1.21.3",
+        "Host": "s3.todus.cu",
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+        "Connection": "keep-alive",
     }
     timeout = max(30, int(timeout_seconds))
     deadline = time.monotonic() + timeout
@@ -1901,23 +1910,26 @@ def upload_to_todus_s3(path: Path, download_name: str, telegram_user_id: int, on
         for attempt in range(3):
             if is_cancelled and is_cancelled():
                 raise RuntimeError("Subida cancelada.")
-            try:
-                with file_path.open("rb") as f_obj:
-                    body = _ToDusProgressStream(
-                        f_obj, size, on_progress=on_progress, is_cancelled=is_cancelled, deadline=deadline
-                    )
-                    resp = session.put(url, data=body, headers=headers, timeout=(30, timeout))
-                    if resp.status_code in {200, 201, 204}:
-                        return url, size
-                    if resp.status_code >= 500 and attempt < 2:
-                        time.sleep(2)
-                        continue
-                    raise RuntimeError(f"ToDus S3 respondió HTTP {resp.status_code}")
-            except requests.RequestException as req_err:
-                if attempt < 2 and time.monotonic() < deadline:
-                    time.sleep(2)
+            target_urls = [url]
+            if "s3.todus.cu" in url:
+                target_urls.append(url.replace("s3.todus.cu", "152.207.206.86"))
+            for target_url in target_urls:
+                verify_ssl = not ("152.207.206.86" in target_url)
+                try:
+                    with file_path.open("rb") as f_obj:
+                        body = _ToDusProgressStream(
+                            f_obj, size, on_progress=on_progress, is_cancelled=is_cancelled, deadline=deadline
+                        )
+                        resp = session.put(target_url, data=body, headers=headers, timeout=(30, timeout), verify=verify_ssl)
+                        if resp.status_code in {200, 201, 204}:
+                            return url, size
+                        if resp.status_code >= 500 and attempt < 2:
+                            continue
+                except requests.RequestException:
                     continue
-                raise RuntimeError(f"Fallo de conexión con ToDus S3: {req_err}") from req_err
+            if attempt < 2 and time.monotonic() < deadline:
+                time.sleep(2)
+                continue
     raise RuntimeError("No se pudo completar la subida a ToDus S3.")
 
 def delete_from_todus_s3(url: str) -> bool:
