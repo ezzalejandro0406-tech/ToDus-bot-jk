@@ -248,17 +248,43 @@ PLANS = {
         "price_value": 0,
         "storage_hours": 12,
         "storage_label": "12 horas",
-        "quota_period_days": 2,
+        "quota_period_days": 1,
     },
-    "vip_basic": {
-        "name": "ᴠɪᴘ ʙáꜱɪᴄᴏ",
-        "display": "VIP Básico",
+    "premium": {
+        "name": "ᴘʀᴇᴍɪᴜᴍ",
+        "display": "Plan Premium",
         "daily_bytes": 10 * GIB,
         "daily_label": "10.00 GB",
-        "badge": "⭐",
+        "badge": "👑",
         "rank": 1,
         "price": "250$",
         "price_value": 250,
+        "storage_hours": 12,
+        "storage_label": "12 horas",
+        "quota_period_days": 1,
+    },
+    "vip": {
+        "name": "ᴠɪᴘ",
+        "display": "Plan VIP",
+        "daily_bytes": 25 * GIB,
+        "daily_label": "25.00 GB",
+        "badge": "⭐",
+        "rank": 2,
+        "price": "500$",
+        "price_value": 500,
+        "storage_hours": 24,
+        "storage_label": "24 horas",
+        "quota_period_days": 1,
+    },
+    "vip_basic": {
+        "name": "ᴠɪᴘ",
+        "display": "Plan VIP",
+        "daily_bytes": 25 * GIB,
+        "daily_label": "25.00 GB",
+        "badge": "⭐",
+        "rank": 2,
+        "price": "500$",
+        "price_value": 500,
         "storage_hours": 24,
         "storage_label": "24 horas",
         "quota_period_days": 1,
@@ -266,23 +292,23 @@ PLANS = {
     "vip_medium": {
         "name": "ᴠɪᴘ ᴍᴇᴅɪᴏ",
         "display": "VIP Medio",
-        "daily_bytes": 15 * GIB,
-        "daily_label": "15.00 GB",
+        "daily_bytes": 35 * GIB,
+        "daily_label": "35.00 GB",
         "badge": "💎",
-        "rank": 2,
-        "price": "500$",
-        "price_value": 500,
-        "storage_hours": 48,
-        "storage_label": "48 horas",
+        "rank": 3,
+        "price": "750$",
+        "price_value": 750,
+        "storage_hours": 24,
+        "storage_label": "24 horas",
         "quota_period_days": 1,
     },
-    "premium": {
-        "name": "ᴘʀᴇᴍɪᴜᴍ",
-        "display": "Premium",
-        "daily_bytes": float('inf') if MAX_FILE_MB_PREMIUM == 0 else (MAX_FILE_MB_PREMIUM * MIB),
-        "daily_label": "Ilimitado (∞ GB)" if MAX_FILE_MB_PREMIUM == 0 else f"{MAX_FILE_MB_PREMIUM} MB",
-        "badge": "👑",
-        "rank": 3,
+    "ultra": {
+        "name": "ᴜʟᴛʀᴀ",
+        "display": "Plan Ultra",
+        "daily_bytes": float('inf'),
+        "daily_label": "Ilimitado (∞ GB)",
+        "badge": "🔥",
+        "rank": 4,
         "price": "1000$",
         "price_value": 1000,
         "storage_hours": 72,
@@ -306,9 +332,11 @@ PLANS = {
 
 PLAN_QUEUE_LIMITS = {
     "free": 2,
-    "vip_basic": 4,
-    "vip_medium": 8,
-    "premium": 12,
+    "premium": 6,
+    "vip": 10,
+    "vip_basic": 10,
+    "vip_medium": 15,
+    "ultra": 30,
     "owner": 10**9,
 }
 
@@ -1553,7 +1581,7 @@ async def cloud_expiration_monitor(application: Application) -> None:
             raise
         except Exception as exc:
             log.warning("Error en monitor Cloud Guardian: %s", exc)
-        await asyncio.sleep(120)
+        await asyncio.sleep(60)
 
 
 def clear_all_task_history() -> int:
@@ -2554,7 +2582,7 @@ def plans_keyboard(user_id: int, bot_username: str | None = None) -> InlineKeybo
 def plan_purchase_text(user_id: int) -> str:
     balance = get_user_balance(user_id)
     lines = [f"💸 Saldo disponible: {balance}$", "", "Solo puedes confirmar un plan si tienes el saldo completo.", ""]
-    for key in ("vip_basic", "vip_medium", "premium"):
+    for key in ("premium", "vip", "ultra"):
         plan = PLANS[key]
         state = "✅ Disponible" if balance >= plan["price_value"] else f"🔒 Faltan {plan['price_value'] - balance}$"
         lines.extend([
@@ -2570,7 +2598,7 @@ def plan_purchase_text(user_id: int) -> str:
 def plan_purchase_keyboard(user_id: int) -> InlineKeyboardMarkup:
     balance = get_user_balance(user_id)
     rows = []
-    for key in ("vip_basic", "vip_medium", "premium"):
+    for key in ("premium", "vip", "ultra"):
         plan = PLANS[key]
         if balance >= plan["price_value"]:
             rows.append([btn(f"✅ {plan['display']} · {plan['price']}", callback_data=f"plans:confirm:{key}")])

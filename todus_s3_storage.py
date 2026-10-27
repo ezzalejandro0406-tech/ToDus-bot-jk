@@ -6,56 +6,42 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
 
 TODUS_S3_BASE_URL = "https://s3.todus.cu/stream"
-CHUNK_SIZE = 16 * 1024 * 1024  # 16 MB para máxima velocidad de subida a ToDus S3
+CHUNK_SIZE = 64 * 1024  # 64 KB para flujo óptimo y estable con ToDus S3
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 2
 mimetypes.add_type("application/vnd.android.package-archive", ".apk")
 
 
 def check_todus_url_alive(url: str, *, timeout_seconds: int = 8) -> bool:
-    """Verifica rápidamente si el archivo en ToDus S3 sigue existiendo y accesible."""
+    """Verifica si el enlace en ToDus S3 sigue respondiendo activamente (detecta 404/410)."""
     headers = {
-        "User-Agent": "Wget/1.21.3",
-        "Host": "s3.todus.cu",
+        "User-Agent": "JK-Telegram-Bot/1.0",
         "Range": "bytes=0-0",
         "Cache-Control": "no-cache, no-store",
+        "Pragma": "no-cache",
     }
-    def _do_check(target_url: str, verify: bool = True) -> tuple[bool | None, int | None]:
-        try:
-            resp = requests.head(target_url, headers=headers, timeout=timeout_seconds, allow_redirects=True, verify=verify)
-            if resp.status_code in {200, 206}:
-                return True, resp.status_code
-            if resp.status_code in {404, 410}:
-                return False, resp.status_code
-            resp_get = requests.get(target_url, headers=headers, timeout=timeout_seconds, stream=True, allow_redirects=True, verify=verify)
-            is_ok = resp_get.status_code in {200, 206}
+    try:
+        resp = requests.head(url, headers=headers, timeout=timeout_seconds, allow_redirects=True)
+        if resp.status_code in {200, 206}:
+            return True
+        if resp.status_code in {404, 410}:
+            return False
+        if resp.status_code == 405:
+            resp_get = requests.get(url, headers=headers, timeout=timeout_seconds, stream=True, allow_redirects=True)
             status = resp_get.status_code
             resp_get.close()
-            return is_ok, status
-        except Exception:
-            return None, None
-
-    res, status = _do_check(url, verify=True)
-    if res is not None:
-        return res
-
-    # Si falló la resolución de dominio s3.todus.cu, intentar directamente por IP nacional 152.207.206.86
-    if "s3.todus.cu" in url:
-        ip_url = url.replace("s3.todus.cu", "152.207.206.86")
-        res_ip, _ = _do_check(ip_url, verify=False)
-        if res_ip is not None:
-            return res_ip
-
-    # Si hay error transitorio de red no interpretamos falsamente como borrado
-    return True
+            if status in {404, 410}:
+                return False
+            return status in {200, 206}
+        return resp.status_code < 400
+    except Exception:
+        # En caso de timeout no asumir falsamente 404
+        return True
 
 
 class ToDusS3UploadError(RuntimeError):
@@ -70,26 +56,27 @@ def delete_from_todus_s3(url: str, *, timeout_seconds: int = 60, base_url: str =
     """Elimina y verifica un objeto previamente subido por este bot."""
     if not url.startswith(base_url.rstrip("/") + "/"):
         raise ValueError("La URL no pertenece al almacenamiento ToDus configurado.")
+
     timeout = max(10, int(timeout_seconds))
     headers = {
         "User-Agent": "JK-Telegram-Bot/1.0",
         "Cache-Control": "no-cache, no-store",
         "Pragma": "no-cache",
     }
+
     try:
         response = requests.delete(url, timeout=timeout, headers=headers)
     except requests.RequestException as exc:
         raise ToDusS3UploadError(f"No se pudo conectar con ToDus S3 ({type(exc).__name__}).") from exc
+
     if response.status_code not in {200, 204, 404}:
         raise ToDusS3UploadError(f"ToDus S3 respondió HTTP {response.status_code} al borrar.")
 
-    # Un DELETE aceptado no garantiza que una CDN o caché ya haya dejado de
-    # servir el objeto. Consultamos una URL con query aleatoria para saltar la
-    # caché y no damos por terminado el borrado mientras siga respondiendo.
     parts = urlsplit(url)
     query = dict(parse_qsl(parts.query, keep_blank_values=True))
     query["hard_delete_check"] = uuid.uuid4().hex
     verify_url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
     last_status = None
     for attempt in range(3):
         try:
@@ -122,6 +109,7 @@ def delete_from_todus_s3(url: str, *, timeout_seconds: int = 60, base_url: str =
                     f"No se pudo verificar el borrado en ToDus ({type(exc).__name__})."
                 ) from exc
             time.sleep(1 + attempt)
+
     raise ToDusS3UploadError(f"No se pudo verificar el borrado en ToDus (HTTP {last_status}).")
 
 
@@ -136,12 +124,14 @@ def build_object_key(
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d-%H%M%S")
     folder_id = uuid.uuid4().hex[:6]
     file_id = uuid.uuid4().hex[:12]
+
     original_name = Path(filename or "download.bin").name
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", original_name).strip("._") or "download.bin"
     extension = Path(safe_name).suffix.lower()
     if not re.fullmatch(r"\.[a-z0-9]{1,16}", extension):
         extension = ".bin"
         safe_name = f"{Path(safe_name).stem or 'download'}{extension}"
+
     return (
         f"users/tg_{int(telegram_user_id)}/telegram/"
         f"{stamp}-{folder_id}/telegram_{file_id}_{safe_name}"
@@ -160,7 +150,7 @@ def _content_disposition(filename: str) -> str:
 
 
 class _ProgressStream:
-    """File-like iterable that streams bytes and reports progress to the bot."""
+    """Flujo que envía fragmentos a ToDus y reporta progreso."""
 
     def __init__(
         self,
@@ -196,7 +186,6 @@ class _ProgressStream:
                 try:
                     self._on_progress(self._sent, self._total)
                 except Exception:
-                    # Un fallo al editar el mensaje de progreso no debe cancelar la subida.
                     pass
         return chunk
 
@@ -208,92 +197,87 @@ class _ProgressStream:
             yield chunk
 
     def __getattr__(self, name):
-        # requests usa tell/fileno para determinar Content-Length cuando es posible.
         return getattr(self._file, name)
 
 
 def upload_to_todus_s3(
-    local_path: str | Path,
-    filename: str,
-    telegram_user_id: int,
+    local_path: str | Path | None = None,
+    filename: str | None = None,
+    telegram_user_id: int | None = None,
     *,
+    path: str | Path | None = None,
+    download_name: str | None = None,
     on_progress=None,
     timeout_seconds: int = 24 * 60 * 60,
     is_cancelled=None,
     base_url: str = TODUS_S3_BASE_URL,
 ) -> tuple[str, int]:
-    """Upload a file with an unauthenticated PUT to ToDus S3 and return its public URL.
-
-    The Telegram user ID is used only as a namespace in the object key. No ToDus
-    account, phone number, password or Authorization header is required.
+    """Sube un archivo a ToDus S3 mediante PUT público y retorna su URL y tamaño.
+    Admite nombres posicionales o por palabra clave (local_path/path, filename/download_name).
     """
-    path = Path(local_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"Archivo no encontrado: {path}")
-    size = path.stat().st_size
-    key = build_object_key(telegram_user_id, filename=filename)
+    actual_path_raw = local_path if local_path is not None else path
+    if actual_path_raw is None:
+        raise ValueError("Se debe proporcionar 'local_path' o 'path'.")
+    actual_path = Path(actual_path_raw)
+    if not actual_path.is_file():
+        raise FileNotFoundError(f"Archivo no encontrado: {actual_path}")
+
+    actual_filename = filename if filename is not None else (download_name or actual_path.name)
+    if telegram_user_id is None:
+        raise ValueError("Se debe proporcionar 'telegram_user_id'.")
+
+    size = actual_path.stat().st_size
+    key = build_object_key(int(telegram_user_id), filename=actual_filename)
     url = f"{base_url.rstrip('/')}/{quote(key, safe='/')}"
-    content_type = mimetypes.guess_type(Path(filename).name)[0] or "application/octet-stream"
+    content_type = mimetypes.guess_type(Path(actual_filename).name)[0] or "application/octet-stream"
     headers = {
         "Content-Type": content_type,
         "Content-Length": str(size),
-        "Content-Disposition": _content_disposition(filename),
-        "User-Agent": "Wget/1.21.3",
-        "Host": "s3.todus.cu",
-        "Accept": "*/*",
-        "Accept-Encoding": "identity",
-        "Connection": "keep-alive",
+        "Content-Disposition": _content_disposition(actual_filename),
+        "User-Agent": "JK-Telegram-Bot/1.0",
     }
     timeout = max(30, int(timeout_seconds))
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
 
     with requests.Session() as session:
-        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=1)
-        session.mount('https://', adapter)
-        session.mount('http://', adapter)
         for attempt in range(MAX_RETRIES):
             if is_cancelled and is_cancelled():
                 raise ToDusS3UploadCancelled("Subida cancelada.")
-            
-            # Intento normal s3.todus.cu, con fallback inmediato a 152.207.206.86 si hay fallo de DNS o conexión
-            target_urls = [url]
-            if "s3.todus.cu" in url:
-                target_urls.append(url.replace("s3.todus.cu", "152.207.206.86"))
-
-            upload_succeeded = False
-            for target_url in target_urls:
-                verify_ssl = not ("152.207.206.86" in target_url)
-                try:
-                    with path.open("rb") as file_obj:
-                        body = _ProgressStream(
-                            file_obj,
-                            size,
-                            on_progress=on_progress,
-                            is_cancelled=is_cancelled,
-                            deadline=deadline,
-                        )
-                        response = session.put(
-                            target_url,
-                            data=body,
-                            headers=headers,
-                            timeout=(30, timeout),
-                            verify=verify_ssl,
-                        )
-                    if response.status_code in {200, 201, 204}:
-                        return url, size
-                    if response.status_code >= 500 and attempt + 1 < MAX_RETRIES:
-                        continue
-                    last_error = ToDusS3UploadError(f"ToDus S3 respondió HTTP {response.status_code}")
-                except ToDusS3UploadCancelled:
-                    raise
-                except requests.RequestException as exc:
-                    last_error = exc
+            try:
+                with actual_path.open("rb") as file_obj:
+                    body = _ProgressStream(
+                        file_obj,
+                        size,
+                        on_progress=on_progress,
+                        is_cancelled=is_cancelled,
+                        deadline=deadline,
+                    )
+                    response = session.put(
+                        url,
+                        data=body,
+                        headers=headers,
+                        timeout=(30, timeout),
+                    )
+            except ToDusS3UploadCancelled:
+                raise
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt + 1 < MAX_RETRIES and time.monotonic() < deadline:
+                    time.sleep(min(RETRY_BACKOFF_SECONDS**attempt, 8))
                     continue
+                raise ToDusS3UploadError(
+                    f"No se pudo conectar con ToDus S3 ({type(exc).__name__})."
+                ) from exc
 
-            if attempt + 1 < MAX_RETRIES and time.monotonic() < deadline:
+            if response.status_code == 200:
+                return url, size
+            if response.status_code >= 500 and attempt + 1 < MAX_RETRIES:
                 time.sleep(min(RETRY_BACKOFF_SECONDS**attempt, 8))
                 continue
+            raise ToDusS3UploadError(
+                f"ToDus S3 respondió HTTP {response.status_code}."
+            )
 
     if last_error:
         raise ToDusS3UploadError(
