@@ -62,26 +62,27 @@ except ImportError:
 #  CONFIGURACIÓN EMBEBIDA (VALORES INTEGRADOS DIRECTAMENTE)
 #  No necesitas configurar ninguna variable en Railway / VPS / Hosting.
 # ═══════════════════════════════════════════════════════════════
-TODUS_BASE_URL = "https://s3.todus.cu/stream"
-TMPDIR = "/tmp"
-TOKEN_BOT_DE_TELEGRAM = "8880272278:AAFspZahBMgFKLCtjLeLE73-p2btyFyESGE"
-TELEGRAM_BOT_TOKEN = TOKEN_BOT_DE_TELEGRAM
-TELEGRAM_BACKUP_CHAT_ID = "-1003809444295"
-ID_API_TELEGRAM = 22012234
-TELEGRAM_API_ID = ID_API_TELEGRAM
-TELEGRAM_API_HASH = "cb5cbb3ab5b6bcf0bfc3df608eef869f"
-REQUIRED_GROUP = "@videogameplay0406"
-REQUIRED_CHANNEL = "@gg_no_root"
-OWNER_TELEGRAM_ID = 7935796405
-MAX_TRANSFER_HOURS = 24
-MAX_FILE_MB_PREMIUM = 0       # 0 = Ilimitado para Premium
-MAX_FILE_MB_FREE = 2048       # 2048 MB = 2 GB para usuarios Gratis
-MAX_CONCURRENT_UPLOADS = 8
-LOG_LEVEL = "INFO"
-GROUP_JOIN_URL = "https://t.me/videogameplay0406"
-DATABASE_PATH = "./data/premium.sqlite3"
-CHANNEL_JOIN_URL = "https://t.me/gg_no_root"
-
+TODUS_BASE_URL = os.getenv("TODUS_BASE_URL", "https://s3.todus.cu/stream")
+TMPDIR = os.getenv("TMPDIR", "/tmp")
+# Las credenciales se leen exclusivamente desde secretos del entorno.
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TOKEN_BOT_DE_TELEGRAM = TELEGRAM_BOT_TOKEN
+TELEGRAM_BACKUP_CHAT_ID = os.getenv("TELEGRAM_BACKUP_CHAT_ID", os.getenv("BACKUP_CHAT_ID", "")).strip()
+TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "0") or 0)
+ID_API_TELEGRAM = TELEGRAM_API_ID
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
+REQUIRED_GROUP = os.getenv("REQUIRED_GROUP", "@videogameplay0406")
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@gg_no_root")
+OWNER_TELEGRAM_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0") or 0)
+MAX_TRANSFER_HOURS = int(os.getenv("MAX_TRANSFER_HOURS", "24") or 24)
+MAX_FILE_MB_PREMIUM = int(os.getenv("MAX_FILE_MB_PREMIUM", "0") or 0)
+MAX_FILE_MB_FREE = int(os.getenv("MAX_FILE_MB_FREE", "2048") or 2048)
+MAX_CONCURRENT_UPLOADS = int(os.getenv("MAX_CONCURRENT_UPLOADS", "2") or 2)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+GROUP_JOIN_URL = os.getenv("GROUP_JOIN_URL", "https://t.me/videogameplay0406")
+BOT_DATA_DIR = os.getenv("BOT_DATA_DIR", "./data")
+DATABASE_PATH = os.getenv("DATABASE_PATH", str(Path(BOT_DATA_DIR) / "premium.sqlite3"))
+CHANNEL_JOIN_URL = os.getenv("CHANNEL_JOIN_URL", "https://t.me/gg_no_root")
 # Configurar logging con el nivel embebido
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
@@ -259,8 +260,8 @@ PLANS = {
         "rank": 1,
         "price": "250$",
         "price_value": 250,
-        "storage_hours": 12,
-        "storage_label": "12 horas",
+        "storage_hours": 72,
+        "storage_label": "72 horas",
         "quota_period_days": 1,
     },
     "vip": {
@@ -298,8 +299,8 @@ PLANS = {
         "rank": 3,
         "price": "750$",
         "price_value": 750,
-        "storage_hours": 24,
-        "storage_label": "24 horas",
+        "storage_hours": 48,
+        "storage_label": "48 horas",
         "quota_period_days": 1,
     },
     "ultra": {
@@ -346,6 +347,7 @@ PLAN_QUEUE_LIMITS = {
 # ═══════════════════════════════════════════════════════════════
 def _get_data_dir() -> Path:
     candidates = [
+        os.getenv("BOT_DATA_DIR", ""),
         os.path.dirname(DATABASE_PATH) or "./data",
         "/data",
         str(Path.home() / ".jk_bot"),
@@ -442,11 +444,18 @@ async def backup_to_telegram(
                 if item.is_file() and not item.name.endswith(".tmp"):
                     if not any(item.resolve() == p.resolve() for p, _ in files_to_pack):
                         files_to_pack.append((item, item.name))
+            # El caché es necesario para que Cloud Guardian pueda restaurar un
+            # objeto borrado después de un redeploy. Se guarda junto al historial.
+            cache_dir = layout.data_dir / "cloud_cache"
+            if cache_dir.exists():
+                for item in cache_dir.rglob("*"):
+                    if item.is_file() and not item.name.endswith(".tmp"):
+                        files_to_pack.append((item, f"cloud_cache/{item.relative_to(cache_dir).as_posix()}"))
 
         if layout.auth_dir.exists():
-            for item in layout.auth_dir.glob("*"):
+            for item in layout.auth_dir.rglob("*"):
                 if item.is_file() and not item.name.endswith(".tmp"):
-                    files_to_pack.append((item, f"telegram_auth/{item.name}"))
+                    files_to_pack.append((item, f"telegram_auth/{item.relative_to(layout.auth_dir).as_posix()}"))
 
         if not files_to_pack:
             return False
@@ -595,10 +604,35 @@ async def restore_from_telegram(
                 else:
                     dest = layout.data_dir / filename
                 dest.parent.mkdir(parents=True, exist_ok=True)
+                # Evitar traversal y no destruir datos locales existentes.
+                root = layout.auth_dir if filename.startswith("telegram_auth/") else layout.data_dir
+                relative_name = filename.replace("telegram_auth/", "", 1) if filename.startswith("telegram_auth/") else filename
+                dest = root / relative_name
+                try:
+                    dest.resolve().relative_to(root.resolve())
+                except ValueError:
+                    raise ValueError("Ruta insegura en el respaldo")
+                if dest.exists():
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(member) as source, open(dest, "wb") as target:
                     shutil.copyfileobj(source, target)
                 restored_files += 1
                 total_bytes += member.file_size
+
+        # Si la ruta absoluta del volumen cambió, reparar referencias del caché.
+        history_path = Path(layout.files_map.get("task_history.json", layout.data_dir / "task_history.json"))
+        if history_path.exists():
+            try:
+                history = json.loads(history_path.read_text(encoding="utf-8"))
+                for entries in history.values():
+                    if isinstance(entries, list):
+                        for entry in entries:
+                            if isinstance(entry, dict) and isinstance(entry.get("cached_paths"), list):
+                                entry["cached_paths"] = [str(layout.data_dir / "cloud_cache" / Path(cp).name) for cp in entry["cached_paths"]]
+                history_path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
 
         log_inst.info(f"✅ ¡Restauración completada con éxito! {restored_files} archivos restaurados.")
         return restored_files, total_bytes
@@ -2125,7 +2159,7 @@ def normalize_apk_filename(path: Path, filename: str) -> str:
                 or suffix in {".xapk", ".apks"}
             ):
                 raise ValueError(
-                    "El enlace contiene un pete dividido (XAPK/APKS), no un APK único instalable."
+                    "El enlace contiene un paquete dividido (XAPK/APKS), no un APK único instalable."
                 )
             is_apk = (
                 "AndroidManifest.xml" in names
@@ -2244,14 +2278,21 @@ async def download_telegram_media(message, mtproto_client=None, progress_callbac
 
             if original is None:
                 try:
-                    chat_peer = await mtproto_client.get_entity(message.chat_id)
-                    msgs = await mtproto_client.get_messages(chat_peer, ids=message.message_id)
+                    msgs = await mtproto_client.get_messages(message.chat_id, ids=message.message_id)
                     if isinstance(msgs, (list, tuple)) and msgs:
                         original = msgs[0]
                     elif msgs:
                         original = msgs
-                except Exception as exc:
-                    log.warning("No se pudo resolver entidad MTProto por chat_id: %s", exc)
+                except Exception as first_exc:
+                    try:
+                        chat_peer = await mtproto_client.get_entity(message.chat_id)
+                        msgs = await mtproto_client.get_messages(chat_peer, ids=message.message_id)
+                        if isinstance(msgs, (list, tuple)) and msgs:
+                            original = msgs[0]
+                        elif msgs:
+                            original = msgs
+                    except Exception as exc:
+                        log.warning("No se pudo resolver mensaje MTProto por chat_id: %s", exc)
 
             if original is None or not getattr(original, "media", None):
                 fwd_chat = getattr(message, "forward_from_chat", None)
@@ -2285,6 +2326,11 @@ async def download_telegram_media(message, mtproto_client=None, progress_callbac
                         await asyncio.sleep(1.5)
 
         if not mtproto_downloaded:
+            if size_hint and size_hint > BOT_API_DOWNLOAD_LIMIT:
+                raise ValueError(
+                    "Archivo muy grande para la Bot API de Telegram (más de 20 MiB). "
+                    "Configura TELEGRAM_API_ID y TELEGRAM_API_HASH para descargarlo con MTProto."
+                )
             for attempt in range(3):
                 path.unlink(missing_ok=True)
                 try:
@@ -3200,6 +3246,8 @@ async def process_task(job: TransferTask, application: Application) -> None:
                 "storage_duration_hours": get_plan_info(get_user_plan(job.user_id)).get("storage_hours", 12),
                 "duration": max(0, job.updated_at - job.created_at),
                 "state": "done",
+                "storage_backend": "todus_s3",
+                "source_kind": job.source_kind,
                 "cached_paths": cached_paths,
                 "chat_id": getattr(job.status_message, "chat_id", None) if job.status_message else None,
                 "message_id": getattr(job.status_message, "message_id", None) if job.status_message else None,
@@ -4908,7 +4956,7 @@ async def post_init(application: Application) -> None:
     application.bot_data["quota_reset_task"] = asyncio.create_task(quota_reset_notifier(application))
     await asyncio.to_thread(expire_cloud_files)
     application.bot_data["cloud_expiration_task"] = asyncio.create_task(cloud_expiration_monitor(application))
-    log.info("Bot activo: @%s (%s)", identity.username, identity.first_name)
+    log.info("Bot activo: @%s (%s)", identity.username, getattr(identity, "first_name", ""))
 
     # Iniciar respaldos periódicos automáticos cada 10 minutos
     if backup_chat_id:
@@ -4918,7 +4966,7 @@ async def post_init(application: Application) -> None:
                 getattr(application.bot, "token", ""),
                 backup_chat_id,
                 backup_layout,
-                interval_seconds=600,
+                interval_seconds=max(30, int(os.getenv("TELEGRAM_BACKUP_INTERVAL_SECONDS", "300") or 300)),
                 lock=application.bot_data["telegram_backup_lock"],
                 logger=log,
             )
@@ -4941,32 +4989,36 @@ async def post_init(application: Application) -> None:
             asyncio.create_task(task_worker(application)) for _ in range(MAX_CONCURRENT_UPLOADS)
         ]
 
-    # Iniciar cliente Telethon MTProto usando las credenciales embebidas
+    # MTProto es opcional; solo se inicia si ambas credenciales están configuradas.
     application.bot_data["mtproto_client"] = None
-    try:
-        session_path = TELEGRAM_AUTH_DIR / "mtproto_bot.session"
-        mtproto_client = TelegramClient(str(session_path), ID_API_TELEGRAM, TELEGRAM_API_HASH)
-        await mtproto_client.start(bot_token=application.bot.token)
-        application.bot_data["mtproto_client"] = mtproto_client
-        application.bot_data["mtproto_message_cache"] = {}
-
-        async def cache_media_update(event):
-            if not getattr(event.message, "media", None):
-                return
-            cache = application.bot_data["mtproto_message_cache"]
-            cache[(event.chat_id, event.id)] = event.message
-            if len(cache) > 128:
-                cache.pop(next(iter(cache)))
-
-        mtproto_client.add_event_handler(cache_media_update, events.NewMessage)
+    runtime_api_id = int(os.getenv("TELEGRAM_API_ID", str(ID_API_TELEGRAM)) or 0)
+    runtime_api_hash = os.getenv("TELEGRAM_API_HASH", TELEGRAM_API_HASH).strip()
+    if not (runtime_api_id and runtime_api_hash):
+        log.info("MTProto no configurado; los archivos dentro del límite de Bot API seguirán funcionando.")
+    else:
         try:
-            await mtproto_client.catch_up()
-        except Exception:
-            pass
-        log.info("MTProto listo con API ID %s", ID_API_TELEGRAM)
-    except Exception as exc:
-        log.warning("MTProto no iniciado: %s (el bot continuará operando vía Bot API)", exc)
+            session_path = TELEGRAM_AUTH_DIR / "mtproto_bot.session"
+            mtproto_client = TelegramClient(str(session_path), runtime_api_id, runtime_api_hash)
+            await mtproto_client.start(bot_token=application.bot.token)
+            application.bot_data["mtproto_client"] = mtproto_client
+            application.bot_data["mtproto_message_cache"] = {}
 
+            async def cache_media_update(event):
+                if not getattr(event.message, "media", None):
+                    return
+                cache = application.bot_data["mtproto_message_cache"]
+                cache[(event.chat_id, event.id)] = event.message
+                if len(cache) > 128:
+                    cache.pop(next(iter(cache)))
+
+            mtproto_client.add_event_handler(cache_media_update, events.NewMessage)
+            try:
+                await mtproto_client.catch_up()
+            except Exception:
+                pass
+            log.info("MTProto listo con API ID %s", runtime_api_id)
+        except Exception as exc:
+            log.warning("MTProto no iniciado: %s (el bot continuará operando vía Bot API)", exc)
 
 async def post_shutdown(application: Application) -> None:
     for task_name in ("quota_reset_task", "cloud_expiration_task", "telegram_backup_task"):
@@ -4982,9 +5034,9 @@ async def post_shutdown(application: Application) -> None:
 
 
 def main() -> None:
-    token = TOKEN_BOT_DE_TELEGRAM.strip()
+    token = TELEGRAM_BOT_TOKEN.strip()
     if not token:
-        raise RuntimeError("Falta TOKEN_BOT_DE_TELEGRAM")
+        raise RuntimeError("Falta TELEGRAM_BOT_TOKEN en el entorno")
 
     defaults = Defaults(parse_mode=ParseMode.HTML)
     application = (

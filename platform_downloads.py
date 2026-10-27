@@ -285,6 +285,7 @@ def download_platform_video(
         "progress_hooks": [check_progress],
         "quiet": True,
         "no_warnings": True,
+        "http_headers": {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) JK-Bot/1.0", "Referer": url},
         "noprogress": True,
         "cachedir": False,
         "writeinfojson": False,
