@@ -633,6 +633,220 @@ def _save_json(path: str, data: dict) -> None:
         log.error(f"No se pudo guardar {path}: {e}")
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SISTEMA DE VINCULACIÓN AUTOMÁTICA CON FOTO DE PERFIL PARA JK DOWNLOADER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+APP_LINKS_FILE = str(DATA_DIR / "app_links.json")
+
+def link_user_app(token: str, user_id: int, full_name: str, username: str | None, photo_url: str | None = None) -> dict:
+    code = token.strip().upper()
+    data = _load_json(APP_LINKS_FILE)
+    if not isinstance(data, dict):
+        data = {}
+    balance = get_user_balance(user_id)
+    user_handle = f"@{username}" if username else ""
+    data[code] = {
+        "user_id": user_id,
+        "name": full_name or "Usuario Verificado JK",
+        "username": user_handle,
+        "telegram_id": str(user_id),
+        "photo_url": photo_url,
+        "status": "Verificado · Activo",
+        "balance": f"{balance}$ CUP",
+        "quota_plan": f"Plan: {plan['badge']} {plan['display']}",
+        "linked_at": datetime.now(timezone.utc).isoformat(),
+        "creator": "ᴊᴀᴋᴜᴅᴏѕʜʏꫂꤪꤨᴼᶠᶜ",
+        "channel": "https://t.me/gg_no_rot",
+        "bot": "@downfree_jk_bot",
+        "active": True
+    }
+    _save_json(APP_LINKS_FILE, data)
+    try:
+        ud = _load_json(USERS_DATA_FILE)
+        if isinstance(ud, dict) and "users" in ud:
+            u_entry = ud["users"].setdefault(str(user_id), {})
+            u_entry["app_linked"] = True
+            u_entry["app_token"] = code
+            u_entry["last_app_sync"] = datetime.now(timezone.utc).isoformat()
+            _save_json(USERS_DATA_FILE, ud)
+    except Exception:
+        pass
+    return data[code]
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_private_update(update):
+        return
+    user = update.effective_user
+    if not user or not update.effective_message:
+        return
+    if not await ensure_membership(update, context):
+        return
+    referral_notice = ""
+    args = getattr(context, "args", []) or []
+    if args:
+        first_arg = str(args[0]).strip()
+        # Detección de código único de start desde JK Downloader (ej: /start JK-839210)
+        if first_arg.upper().startswith("JK") or first_arg.upper().startswith("LINK_JK") or first_arg.upper().startswith("APP_"):
+            token_code = first_arg.upper()
+            avatar_url = None
+            try:
+                # Obtener la foto de perfil real del usuario en Telegram
+                photos = await context.bot.get_user_profile_photos(user.id, limit=1)
+                if photos.total_count > 0:
+                    photo_file = await context.bot.get_file(photos.photos[0][-1].file_id)
+                    avatar_url = photo_file.file_path
+            except Exception:
+                pass
+
+            link_user_app(
+                token_code,
+                user.id,
+                getattr(user, "full_name", "") or getattr(user, "first_name", ""),
+                getattr(user, "username", None),
+                photo_url=avatar_url
+            )
+            user_balance = get_user_balance(user.id)
+            user_handle = f"@{user.username}" if user.username else ""
+            link_lines = [
+                f"👤 ɴᴏᴍʙʀᴇ: {getattr(user, 'full_name', '') or getattr(user, 'first_name', '')}",
+                f"🆔 ɪᴅ ᴛᴇʟᴇɢʀᴀᴍ: {mono:{user.id}}",
+            ]
+            if user_handle:
+                link_lines.append(f"🔗 ᴜꜱᴜᴀʀɪᴏ: {user_handle}")
+            link_lines.extend([
+                "🛡️ ᴇꜱᴛᴀᴅᴏ: ᴠᴇʀɪꜰɪᴄᴀᴅᴏ · ᴀᴄᴛɪᴠᴏ",
+                f"💳 ꜱᴀʟᴅᴏ ᴇɴ ᴄᴜᴇɴᴛᴀ: {user_balance}$ ᴄᴜᴘ",
+                f"🔑 ᴄóᴅɪɢᴏ: {mono:{token_code}}",
+                "",
+                "✅ ¡TU SOLICITUD ESTÁ VERIFICADA CON ÉXITO!",
+                "📲 Ya puedes volver a la aplicación.",
+                "",
+                "🚀 ᴍᴏᴅ ʙʏ ᴊᴀᴋᴜᴅᴏѕʜʏꫂꤪꤨᴼᶠᶜ",
+                "📢 ᴄᴀɴᴀʟ: t.me/gg_no_rot"
+            ])
+            await update.effective_message.reply_text(
+                card("⚡ ᴠɪɴᴄᴜʟᴀᴄɪóɴ ᴊᴋ ᴅᴏᴡɴʟᴏᴀᴅᴇʀ", link_lines),
+                reply_markup=InlineKeyboardMarkup([
+                    [btn("☁️ ᴠᴇʀ ᴍɪ ɴᴜʙᴇ", callback_data="history")],
+                    [btn("🏠 ɪɴɪᴄɪᴏ", callback_data="home")]
+                ]),
+            )
+            return
+
+        match = re.fullmatch(r"ref_(\d+)", first_arg, re.IGNORECASE)
+        if match:
+            referrer_id = int(match.group(1))
+            if user.id == referrer_id:
+                referral_notice = "\n\n⚠️ No puedes usar tu propio enlace de invitación."
+            else:
+                users_data = _load_json(USERS_DATA_FILE).get("users", {})
+                user_entry = users_data.get(str(user.id), {}) if isinstance(users_data, dict) else {}
+                if user_entry.get("referred_by") or user_entry.get("referral_rewarded"):
+                    referral_notice = "\n\n⚠️ Ya eres usuario de este bot y utilizaste un enlace de invitación anteriormente."
+                elif str(user.id) in users_data and user_entry.get("first_seen"):
+                    referral_notice = "\n\n⚠️ Ya eres usuario registrado de este bot. Los enlaces de invitación solo son válidos para nuevos miembros."
+                elif apply_referral(user.id, referrer_id):
+                    referral_notice = "\n\n🎁 Recibiste 5$ de bienvenida por entrar con un enlace de invitación."
+                    try:
+                        await context.bot.send_message(
+                            chat_id=referrer_id,
+                            text=card("🎉 ʀᴇꜰᴇʀɪᴅᴏ ᴄᴏɴꜰɪʀᴍᴀᴅᴏ", [
+                                "Alguien entró con tu enlace.",
+                                "🎊 ¡Felicidades! Recibiste 5$.",
+                                f"💳 Saldo actual: {get_user_balance(referrer_id)}$",
+                            ]),
+                        )
+                    except Exception:
+                        pass
+                    schedule_data_backup(context.application, "recompensa de referido")
+                else:
+                    referral_notice = "\n\n⚠️ Ya eres usuario de este bot o el enlace ya no es válido."
+    await update.effective_message.reply_text(
+        welcome_text(
+            user.id,
+            getattr(user, "full_name", "") or getattr(user, "first_name", ""),
+            getattr(user, "username", None),
+        ) + referral_notice,
+        reply_markup=main_keyboard(user.id),
+    )
+
+
+async def vincular_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_private_update(update):
+        return
+    user = update.effective_user
+    message = update.effective_message
+    if not user or not message:
+        return
+    if not await ensure_membership(update, context):
+        return
+    args = getattr(context, "args", []) or []
+    if not args:
+        token_sug = f"JK-{(user.id % 900000) + 100000}"
+        await message.reply_text(
+            card("🔗 ᴠɪɴᴄᴜʟᴀʀ ᴀᴘᴘ ᴊᴋ", [
+                "Para vincular tu aplicación JK Downloader:",
+                "1. Abre la app en tu teléfono.",
+                "2. Toca en el menú lateral o perfil.",
+                "3. Pulsa el botón azul 'ABRIR TELEGRAM'.",
+                "",
+                f"🔑 Tu código: {{mono:{token_sug}}}",
+                "O envía en este chat:",
+                f"<code>/vincular {token_sug}</code>",
+                "",
+                "🚀 ᴍᴏᴅ ʙʏ ᴊᴀᴋᴜᴅᴏѕʜʏꫂꤪꤨᴼᶠᶜ",
+                "📢 ᴄᴀɴᴀʟ: t.me/gg_no_rot"
+            ]),
+            reply_markup=InlineKeyboardMarkup([[btn("🏠 ɪɴɪᴄɪᴏ", callback_data="home")]]),
+        )
+        return
+    token = str(args[0]).strip().upper()
+    avatar_url = None
+    try:
+        photos = await context.bot.get_user_profile_photos(user.id, limit=1)
+        if photos.total_count > 0:
+            photo_file = await context.bot.get_file(photos.photos[0][-1].file_id)
+            avatar_url = photo_file.file_path
+    except Exception:
+        pass
+
+    link_user_app(
+        token,
+        user.id,
+        getattr(user, "full_name", "") or getattr(user, "first_name", ""),
+        getattr(user, "username", None),
+        photo_url=avatar_url
+    )
+    user_balance = get_user_balance(user.id)
+    user_handle = f"@{user.username}" if user.username else ""
+    lines = [
+        f"👤 ɴᴏᴍʙʀᴇ: {getattr(user, 'full_name', '') or getattr(user, 'first_name', '')}",
+        f"🆔 ɪᴅ ᴛᴇʟᴇɢʀᴀᴍ: {{mono:{user.id}}}",
+    ]
+    if user_handle:
+        lines.append(f"🔗 ᴜꜱᴜᴀʀɪᴏ: {user_handle}")
+    lines.extend([
+        "🛡️ ᴇꜱᴛᴀᴅᴏ: ᴠᴇʀɪꜰɪᴄᴀᴅᴏ · ᴀᴄᴛɪᴠᴏ",
+        f"💳 ꜱᴀʟᴅᴏ ᴇɴ ᴄᴜᴇɴᴛᴀ: {user_balance}$ ᴄᴜᴘ",
+        f"🔑 ᴄóᴅɪɢᴏ: {{mono:{token}}}",
+        "",
+        "✅ ¡TU SOLICITUD ESTÁ VERIFICADA CON ÉXITO!",
+        "📲 Ya puedes volver a la aplicación.",
+        "",
+        "🚀 ᴍᴏᴅ ʙʏ ᴊᴀᴋᴜᴅᴏѕʜʏꫂꤪꤨᴼᶠᶜ",
+        "📢 ᴄᴀɴᴀʟ: t.me/gg_no_rot"
+    ])
+    await message.reply_text(
+        card("⚡ ᴠɪɴᴄᴜʟᴀᴄɪóɴ ᴇxɪᴛᴏꜱᴀ", lines),
+        reply_markup=InlineKeyboardMarkup([
+            [btn("☁️ ᴠᴇʀ ᴍɪ ɴᴜʙᴇ", callback_data="history")],
+            [btn("🏠 ɪɴɪᴄɪᴏ", callback_data="home")]
+        ]),
+    )
+    
 # ═══════════════════════════════════════════════════════════════
 #  GESTIÓN DE USUARIOS, PLANES Y SALDOS
 # ═══════════════════════════════════════════════════════════════
@@ -3341,7 +3555,7 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     await message.reply_text(
         public_leaderboard_text(),
-        reply_markup=InlineKeyboardMarkup([[btn("🏠 ɪɴɪᴄɪᴏ", callback_data="home")]]),
+        reply_markup=InlineKeyboardMarkup([[btn("?? ɪɴɪᴄɪᴏ", callback_data="home")]]),
     )
 
 
@@ -3887,7 +4101,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 try:
                     await context.bot.send_message(
                         chat_id=uid,
-                        text=f"📢 <b>Mensaje De El Admin</b>\n\n{html.escape(b_text)}\n\n{BOT_FOOTER}",
+                        text=f"┎ 📣 <b>ᴍᴇɴѕᴀᴊᴇ ᴅᴇ ᴇʟ ᴀᴅᴍɪɴ\n┠─────────────────────\n┖</b>{html.escape(b_text)}\n\n{BOT_FOOTER}",
                         parse_mode="HTML",
                     )
                     sent_count += 1
@@ -4222,7 +4436,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         chat_id=job.chat_id,
                         document=document,
                         filename=txt_name,
-                        caption=sc("┎ ✅ ᴛxᴛ ʟɪꜱᴛᴏ\n┠──────────────────────\n┠ ʏᴀ ᴇꜱᴛᴀ‌ ᴅɪꜱᴘᴏɴɪʙʟᴇ ᴇɴ ʟᴀ ɴᴜʙᴇ.\n┃\n┠ Tú Archivo está disponible\n┠ para comenzar la descarga\n ┠ toca para abrir el txt\n┠ con el APK Download Free\n┃\n┖ descarga el archivo antes de que\n expire aveces Expira antes de tiempo\n estamos trabajando en ello"),
+                        caption=sc("┎ ✅ ᴛxᴛ ʟɪꜱᴛᴏ\n┠─────────────────────\n┠ ʏᴀ ᴇꜱᴛᴀ‌ ᴅɪꜱᴘᴏɴɪʙʟᴇ ᴇɴ ʟᴀ ɴᴜʙᴇ.\n┃\n┠ Tú Archivo está disponible\n┠ para comenzar la descarga\n┠ toca para abrir el txt\n┠ con el APK Download Free\n┃\n┖ descarga el archivo antes de que expire aveces Expira antes de tiempo estamos trabajando en ello"),
                     )
             except Exception:
                 pass
@@ -4269,7 +4483,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             card("💬 ꜱᴏᴘᴏʀᴛᴇ", [
                 "Escribe tu mensaje y",
                 "se lo enviaré directo",
-                "al administrador.",
+                "al creador.",
             ]),
             reply_markup=contact_keyboard(),
         )
